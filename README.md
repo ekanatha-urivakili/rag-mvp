@@ -1,0 +1,100 @@
+# RAG MVP
+
+Multi-tenant document Q&A. Users upload documents and ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`../rag_mvp_architecture.md`](../rag_mvp_architecture.md).
+
+```
+Streamlit UI ──REST/SSE──> FastAPI (JWT/API key → RBAC) ──> LangGraph corrective-RAG graph
+                                 │                               ├─ Ollama qwen3.5:4b (orchestration)
+                                 │                               └─ Claude Sonnet 5.5 → OpenAI → Ollama (generation)
+                                 ├─ Postgres (source of truth, jobs outbox, rate limits, audit)
+                                 ├─ Qdrant (dense bge-m3 + BM25 sparse, RRF) + local cross-encoder rerank
+                                 └─ S3 (RustFS locally)        Worker: ingest / email (Mailpit) / reindex / purge
+```
+
+## Quickstart (Podman)
+
+```bash
+cp .env.example .env            # then fill JWT_SECRET, POSTGRES_PASSWORD, QDRANT_API_KEY, S3_SECRET_KEY (+ provider keys)
+OLLAMA_HOST=0.0.0.0 ollama serve   # see "Ollama and containers" below
+ollama pull qwen3.5:4b && ollama pull bge-m3
+
+podman build -t localhost/rag-mvp:latest -f Containerfile .
+podman compose up -d --no-build
+podman compose exec api rag admin create --email you@example.com --tenant demo   # prompts for the password
+```
+
+| URL | What |
+| --- | --- |
+| http://localhost:8501 | UI |
+| http://localhost:8000/docs | OpenAPI (disabled when `ENV=prod`) |
+| http://localhost:8025 | Mailpit (invites and password resets). Override with `MAILPIT_UI_PORT` |
+
+**Ollama and containers.** Ollama runs on the host so it can use the Metal GPU. Containers reach it through `host.containers.internal`, which only works when Ollama listens on all interfaces. That also exposes Ollama, which has no authentication, to your LAN. Keep the macOS firewall on, or use a cloud `orchestration` route instead.
+
+### Running on the host (development)
+
+```bash
+uv sync --extra dev
+podman compose up -d postgres qdrant objectstore mailpit
+set -a; . ./.env; set +a
+alembic upgrade head
+uvicorn rag.api.main:app --reload --no-server-header &
+python -m rag.worker &
+(cd ui && API_URL=http://localhost:8000 streamlit run app.py)
+```
+
+### Tests and checks
+
+```bash
+uv run ruff check src tests ui evals && uv run mypy src   # mypy runs in strict mode
+uv run pytest            # unit tests, plus integration tests against the compose services (uses database rag_test)
+uv run python evals/run_eval.py --tenant-id <uuid> --provider anthropic --min-recall 0.85 --min-faithfulness 0.90
+```
+
+The integration suite covers these flows end to end, including real emails read back from Mailpit:
+
+- invite → email → accept → login
+- password reset, with session revocation
+- refresh-token rotation and reuse detection
+- the RBAC matrix: every route × every role
+- tenant and owner isolation (BOLA)
+- upload type spoofing, idempotent re-upload and versioning
+
+`tests/unit/test_route_coverage.py` fails CI if someone adds a route without an auth dependency.
+
+## OWASP coverage
+
+| Risk (Web 2021 / API 2023) | Implementation |
+| --- | --- |
+| **API1 BOLA / A01** | `tenant_id` and `user_id` always come from the token, never the request body. Every query filters by `ctx.tenant_id`. Conversations and feedback also filter by `user_id`, so admins can't read other users' chats. The Qdrant tenant filter is applied inside `VectorStore`. Another tenant's IDs return 404, the same as missing IDs. UUIDv4 IDs. |
+| **API2 Broken auth / A07** | argon2id with transparent rehash. 12–128 character policy (rejects passwords containing the email local-part). JWT is HS256 with the algorithm pinned and `iss`/`aud`/`exp`/`nbf`/`iat`/`jti` required plus a `typ` check. Access TTL is 15 min. Sub-second `iat` makes revocation via `tokens_valid_after` (password reset) exact. Refresh tokens are opaque and stored as SHA-256 hashes. They rotate on every use, and reusing a rotated token revokes the whole token family. Refresh cookie: `HttpOnly`, `SameSite=Strict`, path-scoped. Login failures look identical whether or not the account exists, including timing (a dummy hash is verified). |
+| **API3 BOPLA** | Every input schema sets `extra="forbid"` (no mass assignment). Explicit response models, so hashes and secrets never serialize. Validation errors never echo submitted values. |
+| **API4 Resource consumption** | Postgres fixed-window rate limits shared across replicas: login per IP and per email, password reset per IP and per email, chat per tenant and per user, uploads per tenant. 25 MB upload cap (streamed and bounded) plus a request-body cap. Zip-bomb guard on DOCX. Pagination caps. 4k-character questions. LLM `max_tokens` and timeouts. Graph `recursion_limit`, with at most 1 rewrite. |
+| **API5 BFLA** | `require(Permission)` dependency on every route. The role is read from the DB on every request, so a demotion or removal applies immediately. RBAC matrix test, route-coverage test, last-admin and self-change guardrails. |
+| **API6 Sensitive flows** | Invite and reset are single-use, short-lived and hashed at rest. Forgot-password always returns 202 (no account enumeration). |
+| **API7 SSRF / A10** | No user-supplied URLs are ever fetched. HTML is parsed from the uploaded bytes only. Email links are built only from `PUBLIC_UI_URL`. |
+| **API8 Misconfig / A05** | Security headers (CSP `default-src 'none'`, `nosniff`, `DENY`, `no-referrer`, `no-store`, HSTS in prod). CORS allowlist. `TrustedHostMiddleware`. No server header. Docs and OpenAPI off in prod. Startup refuses a weak `JWT_SECRET`, and refuses CORS `*` or non-https URLs in prod. Containers run non-root with `cap_drop: ALL` and `no-new-privileges`, and ports bind to 127.0.0.1. |
+| **API9 Inventory** | Versioned `/v1` and a single router registry. OpenAPI is hidden in prod. |
+| **API10 Unsafe API consumption** | Every LLM structured output is re-validated with Pydantic. Fallbacks on timeout, error or refusal. |
+| **A03 Injection** | SQLAlchemy bound parameters only. Prompt injection: retrieved text sits in `<doc>` blocks labelled as data, and `</doc>` breakouts are neutralized. No side-effecting tools. Citations are validated deterministically. Jinja autoescapes HTML email. Email subject header-injection guard. Streamlit never uses `unsafe_allow_html`. |
+| **A04 Insecure design** | MIME is sniffed from content rather than trusted from the header. Filenames are sanitized. Storage keys are never derived from filenames. |
+| **A06 Vulnerable components** | `uv.lock`, plus `pip-audit --strict` in CI (clean as of this commit). |
+| **A08 Integrity** | Outbox pattern: emails and jobs commit atomically with the business change. Deterministic Qdrant point IDs. |
+| **A09 Logging** | JSON logs with redaction of bearer tokens, JWTs, API keys and `password=`/`token=`. The access log omits query strings. Audit log: failed logins, refresh-token reuse, invites, joins, role changes, removals, API key create/revoke, document delete, password reset. Delivered email payloads are scrubbed from `jobs`. |
+
+## Deviations from the architecture doc
+
+- **Object storage: RustFS instead of MinIO.** MinIO no longer publishes public images. Any S3 endpoint works through the `S3_*` env vars.
+- **Reranker: `BAAI/bge-reranker-base`** (via fastembed/ONNX, CPU) instead of `bge-reranker-v2-m3`. fastembed doesn't ship v2-m3, and the swap avoids pulling in PyTorch. It's configurable with `RERANKER_MODEL`. `GRADE_THRESHOLD` (default 0.0, in logit units) should be tuned on the eval set.
+- **Generation route has a final local fallback (`ollama/qwen3.5:4b`).** This lets the stack run with no cloud keys. Remove it in `config/models.yaml` if that's not wanted. Sonnet 5.5 runs at `effort: low` for latency. Server-side refusal fallback (beta) is enabled on that entry; set `refusal_fallback: false` to disable it.
+- **No LangGraph Postgres checkpointer.** Conversation state is reloaded from `messages` on every turn, which is all the graph needs today.
+- **Email links use `?token=`, not a URL fragment.** Streamlit can't read fragments server-side. The UI reads the token once, then strips it from the URL. Tokens are single-use and short-lived, and the API only ever receives them in POST bodies.
+- **Two extra endpoints:** `POST /v1/auth/switch-tenant` and `GET /v1/invitations` (the pending list in the Members page). Job types also include `purge_document`, which handles async raw-file and chunk cleanup after a delete.
+- **Faithfulness** is scored by a small LLM-judge in `evals/run_eval.py` on the `eval_judge` route, not the RAGAS library.
+- **Observability:** structured JSON logs with request and trace IDs, and per-message provider, model, fallback, token and latency data stored on `messages`. OpenTelemetry and Langfuse wiring are not done yet.
+
+## Operations
+
+- **Re-embed or switch embedding model:** set `EMBEDDING_*`, then run `rag reindex --version 2`. The worker builds `chunks_v2` from Postgres (no re-parsing), atomically flips the `chunks_current` alias, and drops v1.
+- **Job retries:** 3 attempts with exponential backoff. Terminal ingestion failures mark the document `failed` and email the uploader.
+- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. Provider keys never reach the UI.

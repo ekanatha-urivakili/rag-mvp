@@ -1,0 +1,19 @@
+# Routing by purpose. First entry = primary, the rest are fallbacks in order.
+# Providers without credentials are skipped automatically.
+providers:
+  ollama:    { base_url: "${OLLAMA_BASE_URL}" }
+  anthropic: { api_key_env: ANTHROPIC_API_KEY }
+  openai:    { api_key_env: OPENAI_API_KEY }
+
+routes:
+  orchestration:
+    - { provider: ollama,    model: "qwen3.5:4b",       timeout_s: 8, think: false, keep_alive: "30m" }
+    - { provider: anthropic, model: "claude-haiku-4-5", timeout_s: 8 }
+  generation:
+    # refusal_fallback: server-side fallback when a safety classifier declines (beta).
+    - { provider: anthropic, model: "claude-sonnet-5-5", timeout_s: 60, effort: "low", refusal_fallback: true }
+    - { provider: openai,    model: "${OPENAI_GENERATION_MODEL}", timeout_s: 60 }
+    # Last resort, fully local (also how a tenant gets pinned local-only). Remove in prod if undesired.
+    - { provider: ollama,    model: "qwen3.5:4b", timeout_s: 90, think: false }
+  eval_judge:
+    - { provider: openai,    model: "${OPENAI_JUDGE_MODEL}", timeout_s: 60 }

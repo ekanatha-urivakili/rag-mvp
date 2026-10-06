@@ -1,0 +1,3 @@
+{"question": "How do I install the CLI on Linux?", "expected_sources": ["install-guide.pdf"], "reference_answer": "Download the package and run the installer script with sudo."}
+{"question": "What is the default request timeout?", "expected_sources": ["configuration.md"], "reference_answer": "30 seconds."}
+{"question": "hi there!", "expected_sources": [], "reference_answer": "", "needs_retrieval": false}

@@ -1,0 +1,6 @@
+Hello,
+
+We couldn't process "{{ title }}" after several attempts.
+Reason: {{ error }}
+
+Open the Documents page to retry or upload a different file: {{ link }}

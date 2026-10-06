@@ -1,0 +1,104 @@
+# Run with: podman compose up -d   (Compose spec only; works with podman-compose or docker-compose)
+# Host ports bind to 127.0.0.1 so nothing is exposed on the LAN.
+
+x-app: &app
+  build: { context: ., dockerfile: Containerfile }
+  image: localhost/rag-mvp:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag}
+    QDRANT_URL: http://qdrant:6333
+    S3_ENDPOINT_URL: http://objectstore:9000
+    SMTP_HOST: mailpit
+    SMTP_PORT: "1025"
+    OLLAMA_BASE_URL: ${CONTAINER_OLLAMA_BASE_URL:-http://host.containers.internal:11434}
+  volumes:
+    - models:/models
+  depends_on:
+    postgres: { condition: service_healthy }
+    qdrant: { condition: service_healthy }
+    objectstore: { condition: service_healthy }
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+
+services:
+  api:
+    <<: *app
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn rag.api.main:app --host 0.0.0.0 --port 8000 --no-server-header --no-access-log
+             --proxy-headers --forwarded-allow-ips=$${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      retries: 10
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "rag.worker"]
+    depends_on:
+      api: { condition: service_healthy }
+
+  ui:
+    <<: *app
+    command: >
+      streamlit run ui/app.py --server.port 8501 --server.address 0.0.0.0
+      --server.enableXsrfProtection true --browser.gatherUsageStats false
+    environment:
+      API_URL: http://api:8000
+    ports: ["127.0.0.1:8501:8501"]
+    depends_on:
+      api: { condition: service_healthy }
+
+  postgres:
+    image: docker.io/library/postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  qdrant:
+    image: docker.io/qdrant/qdrant:latest
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+    volumes: [qdrant:/qdrant/storage]
+    ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # S3-compatible object storage (RustFS; MinIO no longer publishes public images). Swap via S3_* env.
+  objectstore:
+    image: docker.io/rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    volumes: [objectstore:/data]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  mailpit:
+    image: docker.io/axllent/mailpit:latest
+    ports: ["127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025", "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  qdrant:
+  objectstore:
+  models:

@@ -1,0 +1,8 @@
+Hello,
+
+{{ inviter }} invited you to join "{{ tenant_name }}" as {{ role }}.
+
+Accept the invitation (valid for {{ expires_hours }} hours, single use):
+{{ link }}
+
+If you weren't expecting this email, you can ignore it.
