@@ -46,3 +46,27 @@ export function Alert({ tone, children }: { tone: "error" | "success" | "info"; 
     </p>
   );
 }
+
+export function Pagination({
+  page,
+  onChange,
+  hasNext,
+  busy = false,
+}: {
+  page: number;
+  onChange: (page: number) => void;
+  hasNext: boolean;
+  busy?: boolean;
+}) {
+  return (
+    <nav aria-label="Pagination" className="flex items-center justify-end gap-3 text-sm">
+      <Button variant="secondary" disabled={page === 0 || busy} onClick={() => onChange(page - 1)}>
+        Previous
+      </Button>
+      <span>Page {page + 1}</span>
+      <Button variant="secondary" disabled={!hasNext || busy || page >= 4000} onClick={() => onChange(page + 1)}>
+        Next
+      </Button>
+    </nav>
+  );
+}

@@ -12,14 +12,23 @@ describe("resolveProxyTarget (BFF allowlist)", () => {
     ["DELETE", ["conversations", ID], `/v1/conversations/${ID}`],
     ["POST", ["messages", ID, "feedback"], `/v1/messages/${ID}/feedback`],
     ["POST", ["documents"], "/v1/documents"],
+    ["GET", ["members"], "/v1/members"],
+    ["PATCH", ["members", ID], `/v1/members/${ID}`],
+    ["DELETE", ["members", ID], `/v1/members/${ID}`],
+    ["GET", ["invitations"], "/v1/invitations"],
+    ["POST", ["invitations"], "/v1/invitations"],
+    ["GET", ["api-keys"], "/v1/api-keys"],
+    ["POST", ["api-keys"], "/v1/api-keys"],
+    ["DELETE", ["api-keys", ID], `/v1/api-keys/${ID}`],
+    ["GET", ["audit-log"], "/v1/audit-log"],
   ])("allows %s %j", (method, segments, expected) => {
     expect(resolveProxyTarget(method, segments)).toBe(expected);
   });
 
   it.each([
-    ["GET", ["members"]], // admin routes are not exposed until their pages exist
-    ["POST", ["api-keys"]],
-    ["GET", ["audit-log"]],
+    ["POST", ["members"]],
+    ["PATCH", ["api-keys", ID]],
+    ["POST", ["audit-log"]],
     ["POST", ["auth", "login"]], // auth goes through /api/auth/* only
     ["PATCH", ["documents", ID]], // wrong method
     ["GET", ["conversations", "not-a-uuid"]],
