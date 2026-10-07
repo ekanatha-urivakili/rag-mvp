@@ -1,3 +1,6 @@
+DOCUMENT_PROCESSING_FAILURE = "Document processing failed. Retry or contact support."
+
+
 class AppError(Exception):
     status_code = 400
     code = "bad_request"

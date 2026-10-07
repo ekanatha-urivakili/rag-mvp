@@ -1,5 +1,5 @@
 import io
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pymupdf
 import pytest
@@ -8,6 +8,7 @@ from PIL import Image
 from rag.adapters.storage import ObjectStorage
 from rag.core.config import get_settings
 from rag.core.errors import UnsupportedMediaType
+from rag.email import handler
 from rag.ingestion.parsers import parse
 from rag.ingestion.sniff import PDF, sniff_mime
 from rag.receipts.ocr import render_pdf_page
@@ -56,3 +57,17 @@ async def test_partial_s3_delete_is_retried() -> None:
         await storage.delete_prefix("tenant/doc/")
     storage._s3.delete_objects.return_value = {"Deleted": [{"Key": "tenant/doc/v1"}]}
     await storage.delete_prefix("tenant/doc/")
+
+
+async def test_old_queued_ingestion_email_hides_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    mailer = AsyncMock()
+    monkeypatch.setattr(handler, "get_mailer", lambda: mailer)
+    await handler.send_email(
+        "job",
+        {
+            "template": "ingestion_failed",
+            "to": "recipient@example.com",
+            "context": {"title": "file", "error": "secret provider response", "link": "/documents"},
+        },
+    )
+    assert "secret provider response" not in str(mailer.send.call_args)

@@ -4,6 +4,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from rag.adapters.mailer import get_mailer
+from rag.core.errors import DOCUMENT_PROCESSING_FAILURE
 
 _env = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
@@ -20,6 +21,8 @@ _text_env = Environment(
 
 async def send_email(job_id: str, payload: dict[str, Any]) -> None:
     template, ctx = payload["template"], payload["context"]
+    if template == "ingestion_failed":
+        ctx = {**ctx, "error": DOCUMENT_PROCESSING_FAILURE}
     await get_mailer().send(
         to=payload["to"],
         subject=_text_env.get_template(f"{template}.subject.txt").render(**ctx).strip(),

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from rag.api.routers import chat
 from rag.auth.rbac import Role
 from rag.core.config import get_settings
-from rag.db.models import Conversation, Job, Message
+from rag.db.models import Conversation, Document, Job, Message
 from rag.db.session import get_sessionmaker
 from rag.ingestion.pipeline import on_ingest_failed
 from tests.integration.conftest import PASSWORD, Account, add_member
@@ -46,6 +46,14 @@ async def test_ingestion_error_is_not_returned_or_emailed(client: httpx.AsyncCli
         assert all("secret provider response" not in str(job.payload) for job in jobs)
     visible = await client.get(f"/v1/documents/{document_id}", headers=tenant.headers)
     assert visible.json()["status"] == "failed" and "secret provider response" not in visible.text
+    async with get_sessionmaker()() as db:
+        document = await db.get(Document, document_id)
+        assert document
+        document.error = "older stored secret provider response"
+        await db.commit()
+    for endpoint in (f"/v1/documents/{document_id}", "/v1/documents"):
+        visible = await client.get(endpoint, headers=tenant.headers)
+        assert visible.status_code == 200 and "secret provider response" not in visible.text
 
 
 async def test_message_cursor_keeps_equal_timestamps(client: httpx.AsyncClient, tenant: Account) -> None:
