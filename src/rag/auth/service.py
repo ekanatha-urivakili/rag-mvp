@@ -178,6 +178,9 @@ async def signup(db: AsyncSession, *, email: str, ip: str | None) -> None:
     await ratelimit.hit(db, f"signup:ip:{ip}", s.rl_signup_per_ip, s.rl_signup_window_s)
     await ratelimit.hit(db, f"signup:email:{email}", 3, s.rl_signup_window_s)
     if (await db.execute(select(User.id).where(User.email == email))).scalar_one_or_none() is not None:
+        # Same API response as a new email (no enumeration), but the owner learns why no signup link came.
+        queue_email(db, template="account_exists", to=email, context={"login_link": f"{s.public_ui_url}/login"})
+        await db.commit()
         return
     raw = new_opaque_token()
     db.add(

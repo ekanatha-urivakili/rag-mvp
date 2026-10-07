@@ -1,0 +1,8 @@
+Hello,
+
+Someone tried to sign up with this email, but it already has an account. Sign in here:
+{{ login_link }}
+
+Forgot your password? Use "Reset password" on the sign-in page.
+
+If this wasn't you, ignore this email — nothing has changed.
