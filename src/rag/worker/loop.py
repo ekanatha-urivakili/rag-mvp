@@ -50,8 +50,13 @@ _CLAIM = text(
 
 
 async def _finish(db: AsyncSession, job_id: str, job_type: str) -> None:
-    scrub = ", payload = jsonb_build_object('redacted', true)" if job_type == "send_email" else ""
-    await db.execute(text(f"UPDATE jobs SET status = 'done', error = NULL{scrub} WHERE id = :id"), {"id": job_id})  # noqa: S608
+    await db.execute(
+        text(
+            "UPDATE jobs SET status = 'done', error = NULL, "
+            "payload = CASE WHEN :scrub THEN jsonb_build_object('redacted', true) ELSE payload END WHERE id = :id"
+        ),
+        {"id": job_id, "scrub": job_type == "send_email"},
+    )
     await db.commit()
 
 
@@ -60,10 +65,12 @@ async def _fail(
 ) -> None:
     message = redact(f"{type(err).__name__}: {err}")[:1000]
     if attempts >= get_settings().job_max_attempts:
-        scrub = ", payload = jsonb_build_object('redacted', true)" if job_type == "send_email" else ""
         await db.execute(
-            text(f"UPDATE jobs SET status = 'failed', error = :e{scrub} WHERE id = :id"),  # noqa: S608
-            {"id": job_id, "e": message},
+            text(
+                "UPDATE jobs SET status = 'failed', error = :e, "
+                "payload = CASE WHEN :scrub THEN jsonb_build_object('redacted', true) ELSE payload END WHERE id = :id"
+            ),
+            {"id": job_id, "e": message, "scrub": job_type == "send_email"},
         )
         if hook := ON_FAILURE.get(job_type):
             async with get_sessionmaker()() as business_db:

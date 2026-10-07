@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 from functools import cache, lru_cache
+from html import escape
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -73,15 +74,14 @@ def _history_block(history: list[ChatTurn]) -> str:
 
 
 def _neutralize(text: str) -> str:
-    # Stop retrieved text from closing/opening our delimiters (prompt-injection hardening).
-    return re.sub(r"(?i)</?\s*doc\b", lambda m: m[0].replace("<", "&lt;"), text)
+    return escape(text, quote=True)
 
 
 def build_context(chunks: list[ScoredChunk]) -> str:
     blocks = []
     for n, c in enumerate(chunks, start=1):
         page = f' page="{c.page}"' if c.page is not None else ""
-        source = _neutralize(c.source).replace('"', "'")
+        source = _neutralize(c.source)
         heading = f"{_neutralize(c.heading_path)}\n" if c.heading_path else ""
         blocks.append(f'<doc id="{n}" source="{source}"{page}>\n{heading}{_neutralize(c.text)}\n</doc>')
     return "\n\n".join(blocks)
