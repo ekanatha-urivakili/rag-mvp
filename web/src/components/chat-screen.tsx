@@ -13,7 +13,7 @@ export function ChatScreen({ conversationId }: { conversationId: string | null }
       >
         <HistorySidebar activeId={conversationId} onNavigate={() => setHistoryOpen(false)} />
       </div>
-      <main className="min-w-0 flex-1">
+      <main className="flex min-w-0 flex-1 flex-col">
         <button
           onClick={() => setHistoryOpen((o) => !o)}
           aria-expanded={historyOpen}
@@ -21,7 +21,9 @@ export function ChatScreen({ conversationId }: { conversationId: string | null }
         >
           {historyOpen ? "Close history" : "History"}
         </button>
-        <ChatThread key={conversationId ?? "new"} conversationId={conversationId} />
+        <div className="min-h-0 flex-1">
+          <ChatThread key={conversationId ?? "new"} conversationId={conversationId} />
+        </div>
       </main>
     </div>
   );

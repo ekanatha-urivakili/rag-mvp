@@ -69,7 +69,7 @@ async def test_receipt_upload_is_extracted_and_tenant_scoped(
     sparse_embedder = AsyncMock(embed_documents=AsyncMock(side_effect=lambda texts: [sparse for _ in texts]))
     monkeypatch.setattr(pipeline, "get_embedder", lambda: dense)
     monkeypatch.setattr(pipeline, "get_sparse_embedder", lambda: sparse_embedder)
-    r = await client.post("/v1/documents", files={"file": ("cafe.png", _receipt_png())}, headers=tenant.headers)
+    r = await client.post("/v1/receipts", files={"file": ("cafe.png", _receipt_png())}, headers=tenant.headers)
     assert r.status_code == 202, r.text
     doc_id = r.json()["document_id"]
     assert await loop.run_once()

@@ -51,6 +51,7 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[uuid.UUID] = _uuid_pk()
     email: Mapped[str] = mapped_column(String(320), unique=True)
+    name: Mapped[str | None] = mapped_column(String(100))
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     # Access tokens issued before this instant are rejected (password reset / forced logout).
@@ -136,6 +137,7 @@ class Document(Base):
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     title: Mapped[str] = mapped_column(String(255))
     source_uri: Mapped[str] = mapped_column(String(512))
+    kind: Mapped[str] = mapped_column(String(16), default="document", server_default="document")
     mime_type: Mapped[str] = mapped_column(String(100))
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     content_hash: Mapped[str] = mapped_column(String(64))
@@ -154,6 +156,7 @@ class Document(Base):
             "uq_documents_tenant_hash_live",
             "tenant_id",
             "content_hash",
+            "kind",
             unique=True,
             postgresql_where=text("status <> 'deleted'"),
         ),

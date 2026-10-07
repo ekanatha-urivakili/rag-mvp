@@ -5,6 +5,7 @@ export type Tenant = { id: string; name: string; role: Role };
 export type Me = {
   user_id: string | null;
   email: string | null;
+  name?: string | null;
   tenant: Tenant;
   permissions: string[];
   tenants: Tenant[];

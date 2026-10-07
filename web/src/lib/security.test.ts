@@ -6,6 +6,9 @@ const ID = "3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b";
 describe("resolveProxyTarget (BFF allowlist)", () => {
   it.each([
     ["GET", ["me"], "/v1/me"],
+    ["PATCH", ["me"], "/v1/me"],
+    ["POST", ["receipts"], "/v1/receipts"],
+    ["POST", ["auth", "password", "change"], "/v1/auth/password/change"],
     ["POST", ["chat"], "/v1/chat"],
     ["GET", ["conversations"], "/v1/conversations"],
     ["PATCH", ["conversations", ID], `/v1/conversations/${ID}`],

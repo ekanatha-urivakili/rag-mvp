@@ -493,3 +493,24 @@ async def bootstrap_admin(db: AsyncSession, *, email: str, password: str, tenant
     audit(db, action="tenant.bootstrap", tenant_id=tenant.id, actor_user_id=user.id)
     await db.commit()
     return tenant.id
+
+
+async def change_password(db: AsyncSession, ctx: RequestContext, current_password: str, new_password: str) -> None:
+    await ratelimit.hit(db, f"password-change:user:{ctx.user_id}", 5, 900)
+    user = (await db.execute(select(User).where(User.id == ctx.user_id).with_for_update())).scalar_one()
+    ok, _ = await asyncio.to_thread(verify_password, current_password, user.password_hash)
+    if not ok:
+        raise AppError("Current password is incorrect", code="invalid_password")
+    validate_password_policy(new_password, user.email)
+    if current_password == new_password:
+        raise AppError("Choose a different new password", code="unchanged_password")
+    user.password_hash = await asyncio.to_thread(hash_password, new_password)
+    user.tokens_valid_after = _now()
+    await _revoke_all_for_user(db, user.id)
+    await db.execute(
+        update(EmailToken)
+        .where(EmailToken.email == user.email, EmailToken.type == "password_reset", EmailToken.used_at.is_(None))
+        .values(used_at=_now())
+    )
+    audit(db, action="auth.password_changed", tenant_id=ctx.tenant_id, actor_user_id=user.id, ip=ctx.ip)
+    await db.commit()

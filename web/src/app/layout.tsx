@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import { connection } from "next/server";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme";
 
 export const metadata: Metadata = {
-  title: "RAG Assistant",
+  title: "FolioNest",
   description: "Ask questions about your documents",
   referrer: "no-referrer",
 };
@@ -13,7 +14,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   await connection();
   return (
     <html lang="en">
-      <body className="min-h-dvh">{children}</body>
+      <body className="min-h-dvh">
+        <ThemeProvider>{children}</ThemeProvider>
+      </body>
     </html>
   );
 }
