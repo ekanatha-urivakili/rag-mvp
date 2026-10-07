@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 from collections.abc import AsyncIterator
@@ -8,9 +9,19 @@ from pydantic import BaseModel
 
 
 @dataclass(frozen=True)
+class Image:
+    data: bytes
+    media_type: Literal["image/jpeg", "image/png", "image/webp"]
+
+    def b64(self) -> str:
+        return base64.b64encode(self.data).decode("ascii")
+
+
+@dataclass(frozen=True)
 class Message:
     role: Literal["system", "user", "assistant"]
     content: str
+    images: tuple[Image, ...] = ()
 
 
 @dataclass

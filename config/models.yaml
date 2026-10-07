@@ -17,3 +17,11 @@ routes:
     - { provider: ollama,    model: "qwen3.5:4b", timeout_s: 90, think: false }
   eval_judge:
     - { provider: openai,    model: "${OPENAI_JUDGE_MODEL}", timeout_s: 60 }
+  # Receipts: vision model reads the image, with OCR text as a hint. Local first; cloud only if the
+  # local model is missing/unreachable/invalid and that provider's key is set.
+  receipt_extraction:
+    # qwen3-vl returns empty structured output with thinking disabled, so it stays on. num_ctx must fit
+    # image tokens + prompt + thinking + JSON; Ollama's default window truncates before the JSON starts.
+    - { provider: ollama, model: "${OLLAMA_VISION_MODEL}", timeout_s: 300, think: true, num_ctx: 16384, keep_alive: "5m", warm: false }
+    - { provider: anthropic, model: "claude-sonnet-5-5", timeout_s: 90, effort: "low" }
+    - { provider: openai,    model: "${OPENAI_VISION_MODEL}", timeout_s: 90 }

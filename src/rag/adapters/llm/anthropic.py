@@ -19,6 +19,15 @@ from rag.adapters.llm.base import (
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
+def _content(m: Message) -> str | list[dict[str, Any]]:
+    if not m.images:
+        return m.content
+    blocks: list[dict[str, Any]] = [
+        {"type": "image", "source": {"type": "base64", "media_type": i.media_type, "data": i.b64()}} for i in m.images
+    ]
+    return [*blocks, {"type": "text", "text": m.content}]
+
+
 class AnthropicLLM:
     provider = "anthropic"
 
@@ -33,7 +42,7 @@ class AnthropicLLM:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "messages": [{"role": m.role, "content": m.content} for m in rest],
+            "messages": [{"role": m.role, "content": _content(m)} for m in rest],
         }
         if system:
             # Static system prompt first and marked cacheable; volatile content lives in messages.

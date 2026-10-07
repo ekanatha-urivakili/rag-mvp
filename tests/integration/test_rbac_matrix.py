@@ -19,6 +19,8 @@ MATRIX = [
     ("GET", "/v1/documents", None, ALL),
     ("GET", f"/v1/documents/{Z}", None, ALL),
     ("DELETE", f"/v1/documents/{Z}", None, {ADMIN, EDITOR}),
+    ("GET", "/v1/receipts", None, ALL),
+    ("GET", f"/v1/receipts/{Z}", None, ALL),
     ("GET", "/v1/conversations", None, ALL),
     ("GET", f"/v1/conversations/{Z}", None, ALL),
     ("POST", f"/v1/messages/{Z}/feedback", {"rating": 1}, ALL),

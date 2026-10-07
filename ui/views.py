@@ -1,4 +1,5 @@
 import contextlib
+import time
 from typing import Any
 
 import pandas as pd
@@ -6,6 +7,8 @@ import streamlit as st
 from api import ApiError, can, chat_stream, clear_session, me, public_post, request, store_tokens
 
 ROLES = ["viewer", "editor", "admin"]
+RECEIPT_TYPES = ["jpg", "jpeg", "png", "webp", "pdf"]
+RECEIPT_WAIT_S = 360
 
 
 def _error(e: ApiError) -> None:
@@ -187,25 +190,48 @@ def chat() -> None:
                     st.markdown(m["content"])
                     if m["role"] == "assistant":
                         _render_sources(m["citations"])
+                        if m.get("model"):
+                            st.caption(f":material/smart_toy: {m['model']} · {m['provider']}")
                         _feedback(m["id"])
         except ApiError as e:
             _error(e)
             st.session_state.pop("conversation_id", None)
 
-    question = st.chat_input("Ask a question about your documents", max_chars=4000)
+    if can("document:write"):
+        prompt = st.chat_input(
+            "Ask a question, or attach a receipt photo",
+            max_chars=4000,
+            accept_file="multiple",
+            file_type=RECEIPT_TYPES,
+        )
+        question = prompt.text if prompt else None
+        for f in prompt.files if prompt else []:
+            _upload_receipt(f.name, f.getvalue())
+    else:
+        question = st.chat_input("Ask a question about your documents", max_chars=4000)
     if not question:
         return
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
         status = st.empty()
-        result: dict[str, Any] = {"citations": [], "done": None, "debug": None, "answer": None}
+        result: dict[str, Any] = {"citations": [], "done": None, "debug": None, "answer": None, "model": None}
+        step = {"name": "starting"}
+
+        def show_status() -> None:
+            m = result["model"]
+            using = f" · using **{m['model']}** ({m['provider']})" if m else ""
+            status.caption(f":material/progress_activity: {step['name']}…{using}")
 
         def tokens() -> Any:
             body = {"message": question, "conversation_id": conv_id}
             for event, data in chat_stream(body):
                 if event == "status":
-                    status.caption(f":material/progress_activity: {data['step']}…")
+                    step["name"] = data["step"]
+                    show_status()
+                elif event == "model":
+                    result["model"] = data
+                    show_status()
                 elif event == "token":
                     yield data["text"]
                 elif event == "answer":
@@ -229,6 +255,8 @@ def chat() -> None:
             _error(e)
         status.empty()
         _render_sources(result["citations"])
+        if result["model"]:
+            st.caption(f":material/smart_toy: {result['model']['model']} · {result['model']['provider']}")
         if result["debug"] and st.session_state.get("debug"):
             st.json(result["debug"], expanded=False)
         if result["done"]:
@@ -248,7 +276,9 @@ def _documents_table() -> None:
     if not page["items"]:
         st.info("No documents yet.")
         return
-    df = pd.DataFrame(page["items"])[["title", "status", "version", "chunk_count", "size_bytes", "updated_at", "error"]]
+    df = pd.DataFrame(page["items"])
+    df["progress"] = df["progress"].map(lambda p: _progress_text(p) if p else "")
+    df = df[["title", "status", "progress", "version", "chunk_count", "size_bytes", "updated_at", "error"]]
     st.dataframe(df, hide_index=True, width="stretch")
     if can("document:delete"):
         titles = {f"{d['title']} · {d['id'][:8]}": d["id"] for d in page["items"]}
@@ -267,8 +297,8 @@ def documents() -> None:
     if can("document:write"):
         with st.form("upload", clear_on_submit=True):
             files = st.file_uploader(
-                "Upload PDF, DOCX, HTML, Markdown or text (max 25 MB)",
-                type=["pdf", "docx", "html", "htm", "md", "txt"],
+                "Upload PDF, DOCX, HTML, Markdown, text, or receipt photos (max 25 MB)",
+                type=["pdf", "docx", "html", "htm", "md", "txt", *RECEIPT_TYPES],
                 accept_multiple_files=True,
             )
             if st.form_submit_button("Upload", type="primary") and files:
@@ -279,6 +309,120 @@ def documents() -> None:
                     except ApiError as e:
                         st.error(f"{f.name}: {e.message}")
     _documents_table()
+
+
+# --- Receipts -----------------------------------------------------------------
+
+
+def _progress_text(p: dict[str, Any]) -> str:
+    step = {"reading": "Reading file", "ocr": "Running OCR", "extracting": "Extracting fields", "indexing": "Indexing"}
+    text = step.get(p.get("step", ""), p.get("step", "Working"))
+    return f"{text} with {p['model']} ({p['provider']})" if p.get("model") else text
+
+
+def _money(r: dict[str, Any], key: str) -> str:
+    return "—" if r.get(key) is None else f"{r[key]} {r.get('currency') or ''}".strip()
+
+
+def _receipt_card(r: dict[str, Any]) -> None:
+    st.markdown(f"#### {r['merchant_name'] or 'Unknown merchant'}")
+    details = [v for v in (r["merchant_address"], r["merchant_phone"]) if v]
+    if details:
+        st.caption(" · ".join(details))
+    when = " ".join(v for v in (r["purchased_on"], (r["purchased_time"] or "")[:5]) if v) or "—"
+    card = " ".join(v for v in (r["card_brand"], f"•••• {r['card_last4']}" if r["card_last4"] else None) if v)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", _money(r, "total"))
+    c2.metric("Items", r["item_count"] if r["item_count"] is not None else "—")
+    c3.metric("Date", when)
+    c4.metric("Paid with", card or (r["payment_method"] or "—").replace("_", " "))
+    if r.get("items"):
+        st.dataframe(pd.DataFrame(r["items"]), hide_index=True, width="stretch")
+    rows = [
+        ("Subtotal", "subtotal"),
+        ("Discounts", "discount_total"),
+        ("Tax", "tax"),
+        ("Tip", "tip"),
+        ("Total", "total"),
+    ]
+    st.dataframe(
+        pd.DataFrame([{"": label, "Amount": _money(r, key)} for label, key in rows if r.get(key) is not None]),
+        hide_index=True,
+    )
+    for w in r["warnings"]:
+        st.warning(w, icon=":material/rule:")
+    st.caption(f":material/smart_toy: Extracted by {r['model']} · {r['provider']}")
+
+
+def _upload_receipt(name: str, data: bytes) -> None:
+    """Uploads a receipt from the chat box and shows live progress, including the model in use."""
+    with st.chat_message("user"):
+        st.markdown(f":material/receipt_long: {name}")
+    with st.chat_message("assistant"):
+        try:
+            doc_id = request("POST", "/v1/documents", files={"file": (name, data)})["document_id"]
+        except ApiError as e:
+            st.error(f"{name}: {e.message}")
+            return
+        with st.status(f"Processing {name}…", expanded=True) as box:
+            line = st.empty()
+            deadline = time.monotonic() + RECEIPT_WAIT_S
+            while True:
+                try:
+                    doc = request("GET", f"/v1/documents/{doc_id}")
+                except ApiError as e:
+                    box.update(label=f"{name}: {e.message}", state="error")
+                    return
+                if doc["status"] in ("ready", "failed"):
+                    break
+                if time.monotonic() > deadline:
+                    box.update(label=f"{name} is still processing. Check the Receipts page shortly.", state="running")
+                    return
+                line.markdown(f":material/progress_activity: {_progress_text(doc['progress'] or {'step': 'queued'})}")
+                time.sleep(1.5)
+            if doc["status"] == "failed":
+                box.update(label=f"{name}: {doc['error'] or 'processing failed'}", state="error")
+                return
+            line.empty()
+            try:
+                receipt = request("GET", f"/v1/receipts/{doc_id}")
+            except ApiError as e:
+                if e.status != 404:
+                    box.update(label=f"{name}: {e.message}", state="error")
+                    return
+                box.update(
+                    label=f"{name}: added. No receipt fields were found; its text is searchable.", state="complete"
+                )
+                return
+            box.update(label=f"Receipt from {receipt['merchant_name'] or name}", state="complete")
+            _receipt_card(receipt)
+
+
+def receipts() -> None:
+    st.title("Receipts")
+    try:
+        page = request("GET", "/v1/receipts", params={"limit": 100})
+    except ApiError as e:
+        _error(e)
+        return
+    if not page["items"]:
+        st.info("No receipts yet. Attach a receipt photo in Chat, or upload one on the Documents page.")
+        return
+    df = pd.DataFrame(page["items"])
+    df["paid_with"] = df["card_brand"].fillna("") + df["card_last4"].map(lambda v: f" •••• {v}" if v else "")
+    df["issues"] = df["warnings"].map(len)
+    cols = ["merchant_name", "purchased_on", "total", "currency", "item_count", "paid_with", "model", "issues"]
+    st.dataframe(df[cols], hide_index=True, width="stretch")
+    labels = {
+        f"{r['merchant_name'] or r['title']} · {r['purchased_on'] or '—'} · {r['total'] or '—'}": r
+        for r in page["items"]
+    }
+    choice = st.selectbox("Receipt details", list(labels))
+    if choice:
+        try:
+            _receipt_card(request("GET", f"/v1/receipts/{labels[choice]['document_id']}"))
+        except ApiError as e:
+            _error(e)
 
 
 # --- Admin --------------------------------------------------------------------

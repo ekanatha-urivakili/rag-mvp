@@ -80,6 +80,24 @@ with Argon2id. Signup initiation and verification are rate-limited.
 Set `SIGNUP_ENABLED=false` for invitation-only operation. Apply `alembic upgrade head` when
 running on the host; Compose applies migration `0002` automatically on API startup.
 
+## Receipts
+
+Attach a receipt photo (JPEG, PNG, WebP) or PDF in **Chat**, or upload it on **Documents**. The worker:
+
+1. OCRs images and text-less PDF pages with RapidOCR (PaddleOCR PP-OCR models on ONNX Runtime, CPU, bundled in the wheel).
+2. Sends the image plus the OCR text to the `receipt_extraction` route in `config/models.yaml`:
+   `ollama/${OLLAMA_VISION_MODEL}` (default `qwen3-vl:latest`) → Claude Sonnet 5.5 → OpenAI `${OPENAI_VISION_MODEL}`.
+   Cloud entries are skipped without a key; Ollama falls through when the model isn't pulled or Ollama is down.
+3. Validates the structured output (merchant, date/time, line items, discounts, subtotal, tax, tip, total, item count,
+   payment method, card brand and last 4) and cross-checks the arithmetic. Mismatches become `warnings`; numbers are
+   never rewritten. Only the last 4 card digits are stored, and Luhn-valid full card numbers in OCR text are masked.
+4. Stores a `receipts` row and indexes a Markdown summary plus the OCR text, so chat can answer questions about it.
+
+`documents.progress` shows the live step and the model being tried; the chat and Documents page display it.
+`GET /v1/receipts` and `GET /v1/receipts/{document_id}` need `document:read`. Locally `qwen3-vl` takes about
+2–3 minutes per receipt on Apple silicon. If no model can answer, the OCR text is still indexed without structured fields.
+The container image installs `libgl1` and `libglib2.0-0t64`, which OpenCV needs.
+
 ## OWASP coverage
 
 | Risk (Web 2021 / API 2023) | Implementation |
