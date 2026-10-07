@@ -2,55 +2,286 @@
 
 Multi-tenant document Q&A with receipt extraction. Users upload documents and receipt photos, then ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-```
-Browser ──same-origin──> Next.js BFF (encrypted session cookie, allowlisted proxy, CSP)
-                               │ REST/SSE + Bearer
-                               ▼
-                         FastAPI (JWT/API key → RBAC) ──> LangGraph corrective-RAG graph
-                                 │                               ├─ Ollama qwen3.5:4b (orchestration)
-                                 │                               └─ Claude Sonnet 5.5 → OpenAI → Ollama (generation)
-                                 ├─ Postgres (source of truth, jobs outbox, rate limits, audit, receipts)
-                                 ├─ Qdrant (dense bge-m3 + BM25 sparse, RRF) + local cross-encoder rerank
-                                 └─ S3 (RustFS locally)
-Worker: ingest (parse / OCR / receipt extraction: qwen3-vl → Claude → OpenAI) · email (Mailpit) · reindex · purge
-```
+The default UI is Next.js; Streamlit is available through the optional `legacy` Compose profile. See the [HLD](#high-level-design-hld) and [ERD](#entity-relationship-diagram-erd) below.
 
 ## Features
 
 **Chat over your documents**
+
 - Corrective RAG: query analysis, hybrid retrieval (dense + BM25, fused with RRF), cross-encoder reranking, relevance grading, and at most one query rewrite before answering.
 - Streamed answers over SSE, with citations validated against the retrieved chunks. Uncited answers become an explicit "not in your documents" response.
+- Document-scoped questions are supported through the chat API (`filters.doc_id`). Greetings and other messages that need no retrieval use a direct response path.
+- Sparse embedding failures fall back to dense retrieval; reranker failures retain retrieval ordering. Retrieved hits are checked against the tenant, ready status, and current document version in Postgres.
 - The UI shows the current step and the model in use, including fallbacks. Every answer records its provider, model, token usage and latency.
 - Chat history: every chat is saved and listed by last activity, grouped by day, searchable by title, renameable and deletable. Open any past chat (`/c/{id}`) and keep asking; follow-ups use its earlier turns. Long chats load the latest 200 messages with "Load earlier".
 - Per-message thumbs up/down feedback.
 - Model routing with fallbacks (`config/models.yaml`): local Ollama first for orchestration, Claude → OpenAI → local for generation. Runs fully local with no cloud keys.
 
 **Documents**
+
 - Drag and drop PDF, DOCX, HTML, Markdown or plain text on Upload docs (25 MB max). The API detects the type from content, never from the client header. Image ingestion remains supported by the document API for existing clients; structured receipt extraction runs only for receipt uploads.
-- Scanned PDFs and images are OCR'd (RapidOCR, CPU).
+- Scanned PDFs and images are OCR'd (RapidOCR, CPU), subject to page and image-size limits. Heading-aware chunking preserves section paths and page references, with token limits and overlap; embeddings are processed in batches.
 - Background ingestion with live progress, retries, versioning (re-uploading changed content creates version N+1), idempotent re-upload, and retry by re-uploading a failed file.
 - Deletion removes chunks, vectors and raw files asynchronously.
 
 **Receipts** ([details](#receipts))
+
 - Upload PDF, JPEG, PNG or WebP on Scan receipts, with desktop drag and drop and mobile camera/gallery controls. A vision model extracts merchant, date and time, line items, discounts, subtotal, tax, tip, total, payment method, and card brand with the last 4 digits.
-- Arithmetic is cross-checked and mismatches are flagged, never "fixed". Full card numbers are masked.
+- Arithmetic is cross-checked and mismatches are flagged, never "fixed". Luhn-valid full card numbers are masked in extracted OCR text; raw uploaded files are retained in object storage.
 - Receipt uploads have their own status list and never appear in the Documents library. Extracted receipts remain searchable from chat.
 
 **Accounts and workspaces**
+
 - Self-serve signup with email verification creates a private workspace where you are admin ([details](#signup)). Set `SIGNUP_ENABLED=false` for invitation-only use.
 - Email invitations into existing workspaces, password reset, and switching between workspaces.
-- Settings for every role: light/dark/device theme, editable profile name, verified email display, and current-password-verified password changes that revoke all sessions. Administrator API keys include help on hover/focus; dropdown arrows share aligned styling.
+- Settings for every role: light/dark/device theme, editable profile name, verified email display, and current-password-verified password changes that revoke all sessions. Administrator API keys include help on hover/focus.
 - Roles: **viewer** (chat, read documents), **editor** (+ upload/delete documents), **admin** (+ members, API keys, audit log). Guards prevent removing or demoting the last admin.
-- API keys for programmatic access, scoped to a tenant and role.
+- API keys for programmatic access, scoped to a tenant and role: create, list, copy the secret once, and revoke. Secrets are stored as hashes; user-owned chat and profile/password changes require a user session.
+- Member management includes pending invitations, role changes, removal, and paginated lists. Audit history supports loading older events.
 - An audit log of security-relevant events.
 
 **Platform**
+
 - Tenant isolation is enforced in Postgres and Qdrant. Another tenant's IDs return 404.
 - Postgres outbox for jobs and email, rate limits shared across replicas, and structured JSON logs with secret redaction.
-- Zero-downtime re-embedding (`rag reindex`) through a Qdrant alias swap.
+- Re-embedding (`rag reindex`) through a Qdrant alias swap, with bounded batches and retry recovery. Model/dimension changes require coordinated API/worker settings and a query pause ([operations](#operations)).
 - Retrieval and faithfulness evals (`evals/run_eval.py`).
 - Next.js web UI that keeps API tokens out of the browser (backend-for-frontend), with CSRF, CSP and XSS controls ([details](#web-ui)).
-- OWASP Web/API Top 10 controls ([mapping](#owasp-coverage)).
+- Liveness and dependency readiness endpoints, bounded local model warmup, non-root containers, persistent local infrastructure volumes, and automatic database migrations on Compose API startup.
+- CLI commands for administrator/workspace creation and queued reindexing; a local workspace smoke-test script.
+- CI checks for Python and web lint, formatting, types, tests, web builds, and dependency audits; optional retrieval/faithfulness evaluation gate.
+- OWASP Web/API Top 10 controls ([mapping](#owasp-coverage)), including escaped document context and static parameterized worker updates.
+
+## High-level design (HLD)
+
+```mermaid
+flowchart TB
+    browser["Browser / mobile browser"]
+    client["Programmatic client"]
+    legacy["Optional Streamlit UI"]
+    subgraph application["Application services"]
+        web["Next.js UI + BFF<br/>Encrypted HttpOnly session, Origin checks, allowlisted proxy"]
+        api["FastAPI /v1<br/>JWT / API keys, RBAC, tenant and owner checks, rate limits"]
+        graph["LangGraph corrective RAG<br/>Analyze, retrieve, grade, rewrite once, generate, validate citations"]
+        retrieval["Retrieval<br/>Dense + BM25, RRF, Postgres version check, rerank"]
+        worker["Async worker<br/>Ingest, send email, reindex, purge"]
+        ingest["Ingestion<br/>Parse / OCR, receipt extraction, heading-aware chunks, batch embeddings"]
+    end
+    subgraph persistence["Persistence"]
+        pg[("PostgreSQL<br/>Identity, content, chat, receipts, jobs, audit, rate limits")]
+        vectors[("Qdrant<br/>Tenant-filtered dense / sparse index, collection alias")]
+        storage[("S3-compatible storage<br/>RustFS locally, versioned raw uploads")]
+    end
+    subgraph providers["Model and email adapters"]
+        embed["Embeddings<br/>Ollama bge-m3 or OpenAI"]
+        local["Local CPU models<br/>BM25, cross-encoder reranker, RapidOCR"]
+        llm["Purpose-based LLM routing<br/>Ollama / Anthropic / OpenAI, configured fallbacks"]
+        smtp["SMTP<br/>Mailpit locally"]
+    end
+    browser -->|"Same-origin HTTP / SSE"| web
+    web -->|"REST / SSE + bearer token"| api
+    client -->|"JWT or API key"| api
+    legacy -->|"User JWT"| api
+    api --> pg
+    api -->|"Store raw uploads"| storage
+    api --> graph
+    graph --> retrieval
+    graph --> llm
+    retrieval --> embed
+    retrieval --> local
+    retrieval --> vectors
+    retrieval -->|"Validate live document versions"| pg
+    worker -->|"Claim and lock committed jobs"| pg
+    worker --> ingest
+    worker -->|"Email jobs"| smtp
+    worker -->|"Reindex / purge"| vectors
+    worker -->|"Purge raw files"| storage
+    ingest -->|"Read uploaded bytes"| storage
+    ingest --> local
+    ingest -->|"Receipt extraction"| llm
+    ingest --> embed
+    ingest --> vectors
+    ingest -->|"Chunks, receipts, status and progress"| pg
+```
+
+**Upload flow:** the API validates and stores the file, then commits document metadata and an ingestion job together. The worker parses/OCRs the file, optionally extracts receipt fields, chunks and embeds the content, updates Qdrant, and marks the current document version ready. Deletion marks the document deleted and queues cleanup of chunks, receipt fields, vectors, and raw versions.
+
+**Chat flow:** the API loads the user's conversation history and invokes the graph. Retrieval searches only the authenticated tenant and excludes hits whose document is no longer ready or current in Postgres. The graph may rewrite an unsuccessful query once; generation streams provisional tokens, then validates citation indices and sends the canonical answer. Messages, citations, model usage, and feedback are persisted in Postgres.
+
+**Service boundaries:** the browser uses the BFF; direct API clients authenticate separately. PostgreSQL is the source of truth and job queue; Qdrant is derived search state and S3 holds raw files. Workers process committed jobs with row locks and bounded retries. Model routing is deployment-wide, and cloud routes require credentials. The graph has no SQL or side-effecting tools.
+
+## Entity relationship diagram (ERD)
+
+This diagram includes all 15 implemented PostgreSQL tables, with selected columns from [`src/rag/db/models.py`](src/rag/db/models.py). Relationships represent declared foreign keys. `PK` and `FK` mark primary and foreign keys; `UK` marks a single-column unique constraint. Nullable parent references use `o|`.
+
+```mermaid
+erDiagram
+    tenants ||--o{ memberships : has
+    users ||--o{ memberships : joins
+    tenants o|--o{ email_tokens : scopes
+    users o|--o{ email_tokens : creates
+    tenants ||--o{ refresh_tokens : scopes
+    users ||--o{ refresh_tokens : owns
+    tenants ||--o{ api_keys : scopes
+    users o|--o{ api_keys : creates
+    tenants o|--o{ audit_log : scopes
+    tenants ||--o{ documents : owns
+    users o|--o{ documents : uploads
+    documents ||--o{ chunks : contains
+    documents ||--o| receipts : extracts
+    tenants ||--o{ receipts : scopes
+    tenants ||--o{ conversations : scopes
+    users ||--o{ conversations : owns
+    conversations ||--o{ messages : contains
+    messages ||--o{ feedback : receives
+    users ||--o{ feedback : submits
+
+    tenants {
+        uuid id PK
+        varchar name UK
+        timestamptz created_at
+    }
+    users {
+        uuid id PK
+        varchar email UK
+        varchar name
+        varchar password_hash
+        boolean is_active
+        timestamptz tokens_valid_after
+    }
+    memberships {
+        uuid user_id PK, FK
+        uuid tenant_id PK, FK
+        varchar role
+    }
+    email_tokens {
+        uuid id PK
+        varchar type
+        varchar email
+        uuid tenant_id FK
+        uuid created_by FK
+        varchar token_hash UK
+        timestamptz expires_at
+        timestamptz used_at
+    }
+    refresh_tokens {
+        uuid id PK
+        uuid user_id FK
+        uuid tenant_id FK
+        uuid family_id
+        varchar token_hash UK
+        uuid replaced_by
+        timestamptz expires_at
+        timestamptz revoked_at
+    }
+    api_keys {
+        uuid id PK
+        uuid tenant_id FK
+        uuid created_by FK
+        varchar name
+        varchar role
+        varchar key_prefix UK
+        varchar key_hash
+        timestamptz revoked_at
+    }
+    audit_log {
+        bigint id PK
+        uuid tenant_id FK
+        uuid actor_user_id
+        varchar action
+        varchar target_type
+        varchar target_id
+        jsonb metadata
+    }
+    documents {
+        uuid id PK
+        uuid tenant_id FK
+        uuid uploaded_by FK
+        varchar title
+        varchar source_uri
+        varchar kind
+        varchar content_hash
+        integer version
+        varchar status
+        jsonb progress
+    }
+    chunks {
+        uuid id PK
+        uuid document_id FK
+        integer version
+        integer chunk_index
+        text text
+        text heading_path
+        integer page_start
+        integer page_end
+        integer token_count
+    }
+    receipts {
+        uuid document_id PK, FK
+        uuid tenant_id FK
+        integer version
+        varchar merchant_name
+        date purchased_on
+        time purchased_time
+        varchar currency
+        jsonb items
+        jsonb discounts
+        numeric total
+        varchar card_last4
+        jsonb warnings
+    }
+    conversations {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        varchar title
+        timestamptz updated_at
+    }
+    messages {
+        uuid id PK
+        uuid conversation_id FK
+        varchar role
+        text content
+        jsonb citations
+        varchar provider
+        varchar model
+        integer tokens_in
+        integer tokens_out
+        integer latency_ms
+        jsonb debug
+    }
+    feedback {
+        uuid message_id PK, FK
+        uuid user_id PK, FK
+        smallint rating
+        text comment
+    }
+    jobs {
+        uuid id PK
+        varchar type
+        jsonb payload
+        varchar status
+        integer attempts
+        timestamptz run_after
+        timestamptz locked_at
+        text error
+    }
+    rate_limits {
+        varchar key PK
+        timestamptz window_start PK
+        integer count
+    }
+```
+
+- `memberships` implements workspace roles; a user can belong to multiple tenants. Email tokens cover signup, invitations, and password reset. Refresh-token families provide rotation, replay detection, and session revocation.
+- Documents distinguish `document` and `receipt` libraries. Live file hashes are unique per `(tenant_id, content_hash, kind)`; chunks are unique per `(document_id, version, chunk_index)`. A receipt row belongs to one document and is visible only for its ready current version.
+- Conversation ownership is checked using both tenant and user. Deleting a conversation cascades to its messages and feedback. Citations and receipt line items are JSONB values, not separate relational tables.
+- `jobs.payload` carries document IDs, versions, email context, or reindex targets without database foreign keys. `audit_log.actor_user_id` and `refresh_tokens.replaced_by` also have no declared foreign keys. Rate-limit buckets use a composite key and include tenant/user/IP/email scope in their key string.
+- Qdrant points and S3 objects are outside the relational ERD. Vectors carry tenant, document ID, version, and chunk metadata; raw object keys use `{tenant_id}/{document_id}/v{version}`.
+
+## Implemented scope and limits
+
+The features above are implemented. SSO/OIDC, custom roles, per-document ACLs, GraphRAG, web-search/action agents, tenant-specific model routing, multi-region deployment, OpenTelemetry, and Langfuse are deferred. Default retrieval is tenant-wide; API clients may filter by document. Citation validation checks supplied source indices, while factual faithfulness is evaluated separately. The web app has no offline/PWA workflow.
 
 ## Quickstart
 
@@ -65,7 +296,7 @@ Worker: ingest (parse / OCR / receipt extraction: qwen3-vl → Claude → OpenAI
 3. Checks that the ports are free, and warns if Ollama or its models are missing.
 4. Starts Postgres, Qdrant, RustFS and Mailpit, and waits for them to be healthy.
 5. Runs ruff, strict mypy, and the full unit + integration suite, then the web UI's lint, typecheck, format check and unit tests (if `npm` is installed).
-6. Builds the images, starts the API, worker, web UI and legacy UI, waits for health, and opens the web UI in your browser.
+6. Builds the images, starts the API, worker and web UI, waits for health, and opens the web UI in your browser.
 
 | Command | What it does |
 | --- | --- |
@@ -117,34 +348,37 @@ set -a; . ./.env; set +a
 alembic upgrade head
 uvicorn rag.api.main:app --reload --no-server-header &
 python -m rag.worker &
-(cd web && npm ci && SESSION_SECRET=$SESSION_SECRET API_URL=http://localhost:8000 npm run dev)   # http://localhost:3000
+(cd web && npm ci && SESSION_SECRET=$SESSION_SECRET APP_ORIGIN=http://localhost:3000 API_URL=http://localhost:8000 npm run dev)   # http://localhost:3000
 (cd ui && API_URL=http://localhost:8000 streamlit run app.py)                                     # legacy, :8501
 ```
 
 ## API
 
-All routes are versioned under `/v1`. Each one requires a JWT (`Authorization: Bearer`) or an API key (`X-API-Key`), except the public auth routes and health checks.
+All routes are versioned under `/v1`. Protected routes require a JWT (`Authorization: Bearer`) or an API key (`X-API-Key`). Chat, chat history, feedback, profile edits, and session/password management require a user session. Signup, verification, login, refresh, forgot/reset password, invitation acceptance, and health checks are public; token-based flows validate their supplied credentials.
 
 | Area | Endpoints | Permission |
 | --- | --- | --- |
 | Auth | `POST /auth/signup`, `/auth/signup/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/switch-tenant`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/password/change` | public, except logout/switch/change |
+| Invitation acceptance | `POST /invitations/accept` | public; single-use invitation token |
 | Profile | `GET /me`, `PATCH /me` (name) | any role; edits require a user session |
-| Chat | `POST /chat` (SSE: `status`, `model`, `token`, `answer`, `citations`, `done`; pass `conversation_id` to continue a chat), `POST /messages/{id}/feedback` | `chat:use` |
-| Chat history | `GET /conversations?limit&q&before&before_id` (most recent first, keyset paging, title search), `GET /conversations/{id}?limit&before`, `PATCH`/`DELETE /conversations/{id}` | `chat:use`, own only |
+| Chat | `POST /chat` (SSE: `status`, `model`, `token`, `answer`, `citations`, `done`, `error`, and development-only `debug`; pass `conversation_id` to continue a chat), `POST /messages/{id}/feedback` | `chat:use`, user session |
+| Chat history | `GET /conversations?limit&q&before&before_id` (most recent first, keyset paging, title search), `GET /conversations/{id}?limit&before`, `PATCH`/`DELETE /conversations/{id}` | `chat:use`, user session, own only |
 | Documents | `POST /documents`, `GET /documents[/{id}]`, `DELETE /documents/{id}` | `document:read` / `write` / `delete` |
 | Receipts | `POST /receipts`, `GET /receipts`, `GET /receipts/{document_id}`; upload status via `GET /documents?kind=receipt` | `document:write` / `read` |
 | Members | `GET /members`, `PATCH`/`DELETE /members/{user_id}`, `POST`/`GET /invitations` | `member:manage` |
 | API keys | `GET`/`POST /api-keys`, `DELETE /api-keys/{id}` | `apikey:manage` |
-| Audit | `GET /audit-log` | `audit:read` |
+| Audit | `GET /audit-log?limit&before_id` (newest first, ID cursor) | `audit:read` |
 | Health | `GET /healthz`, `GET /readyz` (unversioned) | public |
 
-Clients must use the SSE `answer` event as the final answer text. Streamed `token` events are provisional.
+For document answers, clients must use the SSE `answer` event to replace provisional `token` text after citation validation. Direct responses and insufficient-context paths stream tokens followed by `done` without a separate `answer` event. An `error` event reports a failed turn.
 
 ## Tests and checks
 
 ```bash
 ./start.sh test          # starts the test infrastructure, then runs everything below
-uv run ruff check src tests ui evals && uv run mypy src   # mypy runs in strict mode
+uv run ruff check src tests ui evals scripts
+uv run ruff format --check src tests ui evals scripts
+uv run mypy src   # mypy runs in strict mode
 uv run pytest            # unit tests, plus integration tests against the compose services (uses database rag_test)
 (cd web && npm run lint && npm run typecheck && npm test && npm run build)
 uv run python evals/run_eval.py --tenant-id <uuid> --provider anthropic --min-recall 0.85 --min-faithfulness 0.90
@@ -162,6 +396,9 @@ The integration suite covers these flows end to end, including real emails read 
 - upload type spoofing, idempotent re-upload, versioning and failed-upload retry
 - receipt upload → OCR → extraction → receipts API, including tenant isolation and delete cascade
 - concurrency regressions: concurrent uploads, worker lease expiry, reindex recovery and stale-vector filtering
+- worker payload handling: email secrets are scrubbed on completion and terminal failure, retained for retries; other job payloads are preserved
+
+Unit tests also verify escaping of retrieved text, headings, and source attributes against delimiter and attribute injection.
 
 `tests/unit/test_route_coverage.py` fails CI if someone adds a route without an auth dependency.
 
@@ -181,7 +418,7 @@ changing the account. Passwords follow the existing 12–128 character policy an
 with Argon2id. Signup initiation and verification are rate-limited.
 
 Set `SIGNUP_ENABLED=false` for invitation-only operation. Apply `alembic upgrade head` when
-running on the host; Compose applies migration `0002` automatically on API startup.
+running on the host; Compose upgrades to the latest migration on API startup (currently `0005`).
 
 ## Receipts
 
@@ -197,8 +434,7 @@ Upload a receipt photo (JPEG, PNG, WebP) or PDF in **Scan receipts**. The worker
 4. Stores a `receipts` row and indexes a Markdown summary plus the OCR text, so chat can answer questions about it.
 
 `documents.progress` records the live processing step and model; Scan receipts shows upload status separately from Documents.
-`GET /v1/receipts` and `GET /v1/receipts/{document_id}` need `document:read`. Locally `qwen3-vl` takes about
-2–3 minutes per receipt on Apple silicon. If no model can answer, the OCR text is still indexed without structured fields.
+`GET /v1/receipts` and `GET /v1/receipts/{document_id}` need `document:read`. Receipt processing latency depends on the model, hardware, and image size; the default local extraction timeout is 300 seconds. If no model can answer, the OCR text is still indexed without structured fields.
 The container image installs `libgl1` and `libglib2.0-0t64`, which OpenCV needs.
 
 ## Web UI
@@ -210,7 +446,7 @@ The container image installs `libgl1` and `libglib2.0-0t64`, which OpenCV needs.
 - **Client identity.** `TRUSTED_PROXY_HOPS=0` ignores forwarded IPs by default: direct clients share the BFF's API IP bucket. Enable a positive hop count only behind a trusted ingress that overwrites/appends the actual peer IP and prevents direct access to the web service. A single such ingress normally uses `1`; Next.js does not append a hop to an existing header. Compose passes this setting to `web`. Never enable it for direct public access.
 - **CSRF:** `SameSite=Strict` plus an exact `Origin` check on every mutating request.
 - **XSS:** per-request nonce CSP with `strict-dynamic`, no remote images, markdown rendered without raw HTML, and `dangerouslySetInnerHTML` banned by lint.
-- Env: `SESSION_SECRET` (generated by `start.sh`), `WEB_ORIGIN` (must be https in prod), `API_URL`, `TRUSTED_PROXY_HOPS`.
+- Env: `SESSION_SECRET` (generated by `start.sh`), `APP_ORIGIN` (must be https in prod), `API_URL`, `ENV`, `TRUSTED_PROXY_HOPS`. Compose maps the root `.env` setting `WEB_ORIGIN` to the web process's `APP_ORIGIN`.
 
 FolioNest uses a teal/indigo/amber logo, a home hero and workspace footer links. Mobile bottom navigation shows **Home, Upload docs, Scan receipts, Members, Settings**, with Members restricted to managers. All roles can access personal settings; administrator API keys and audit history retain their permissions. Receipts upload directly on Scan receipts and stay in a separate library. Native camera/gallery inputs share only selected files; OS/browser controls permission prompts and gallery visibility. Camera capture depends on mobile browser support. HEIC is rejected with a format error; export it as JPEG/PNG/WebP first.
 
@@ -229,7 +465,7 @@ Legacy Streamlit renders untrusted chat, citations and receipt text as plain tex
 
 ## OWASP coverage
 
-The table below retains Web 2021 identifiers. The current [principal review](docs/PRINCIPAL_CODE_REVIEW.md) maps all Web 2025 and API 2023 categories and records residual deployment risks.
+The table below maps implemented controls to Web 2021 and API 2023 identifiers. Deployment constraints and scope are documented in [the architecture](docs/ARCHITECTURE.md).
 
 | Risk (Web 2021 / API 2023) | Implementation |
 | --- | --- |
@@ -243,9 +479,9 @@ The table below retains Web 2021 identifiers. The current [principal review](doc
 | **API8 Misconfig / A05** | API security headers (CSP `default-src 'none'`, `nosniff`, `DENY`, `no-referrer`, `no-store`, HSTS in prod). CORS allowlist. `TrustedHostMiddleware`. No server header. Docs and OpenAPI off in prod. Startup refuses a weak `JWT_SECRET`, and in prod rejects wildcard CORS/hosts, non-HTTPS UI/CORS URLs, missing Qdrant authentication and default S3 secrets. Containers run non-root with `cap_drop: ALL` and `no-new-privileges`, and ports bind to 127.0.0.1. |
 | **API9 Inventory** | Versioned `/v1` and a single router registry. OpenAPI is hidden in prod. |
 | **API10 Unsafe API consumption** | Every LLM structured output is re-validated with Pydantic. Fallbacks on timeout, error or refusal. |
-| **A03 Injection** | SQLAlchemy bound parameters only. Prompt injection: retrieved text sits in `<doc>` blocks labelled as data, and `</doc>` breakouts are neutralized. No side-effecting tools. Citation indices are validated deterministically; the SSE `answer` event carries the canonical cleaned text, and the UI replaces provisional text with it. Uncited document answers become insufficient-context responses. Valid indices alone do not prove factual faithfulness. Jinja autoescapes HTML email. Email subject header-injection guard. Streamlit never uses `unsafe_allow_html`. |
+| **A03 Injection** | SQLAlchemy bound parameters only. Prompt injection: retrieved text, headings, and source attributes are HTML/XML-escaped inside `<doc>` blocks labelled as data. Encoding protects markup boundaries but does not guarantee that the model ignores malicious prose. No side-effecting tools. Citation indices are validated deterministically; the SSE `answer` event carries the canonical cleaned text, and the UI replaces provisional text with it. Uncited document answers become insufficient-context responses. Valid indices alone do not prove factual faithfulness. Jinja autoescapes HTML email. Email subject header-injection guard. Streamlit never uses `unsafe_allow_html`. |
 | **A04 Insecure design** | MIME is sniffed from content rather than trusted from the header. Filenames are sanitized. Storage keys are never derived from filenames. |
-| **A06 Vulnerable components** | `uv.lock`, plus `pip-audit --strict` in CI (clean as of this commit). Web: `package-lock.json` and `npm audit --omit=dev --audit-level=high` in CI. |
+| **A06 Vulnerable components** | `uv.lock`, plus `pip-audit --strict` in CI. Web: `package-lock.json` and `npm audit --omit=dev --audit-level=high` in CI. |
 | **A08 Integrity** | Outbox pattern: emails and jobs commit atomically with the business change. Deterministic Qdrant point IDs. |
 | **A09 Logging** | JSON logs with redaction of bearer tokens, JWTs, API keys and `password=`/`token=`. The access log omits query strings. Audit log: failed logins, refresh-token reuse, invites, joins, role changes, removals, API key create/revoke, document delete, password reset. Delivered email payloads are scrubbed from `jobs`. |
 
@@ -264,13 +500,12 @@ The table below retains Web 2021 identifiers. The current [principal review](doc
 
 - **Re-embed or switch embedding model:** set `EMBEDDING_*`, then run `rag reindex --version 2`. The worker builds `chunks_v2` from Postgres (no re-parsing), atomically flips the `chunks_current` alias, and retains the previous collection for in-flight reads and manual rollback. Reindex serializes against ingestion/upload/delete, rebuilds an incomplete target on retry, and reads Postgres in bounded batches. Stop query traffic during embedding model/dimension changes; the API and worker need the same new embedding settings. Remove retired collections after the rollback window.
 - **Job retries:** 3 attempts with exponential backoff. Terminal ingestion failures mark the document `failed` and email the uploader. Re-uploading that file queues another attempt. Workers hold a dedicated job-row lock during processing, preventing lease expiry from reclaiming a live job. Both successful and terminally failed email jobs have their link payloads scrubbed.
-- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. The `web` service receives only `API_URL`, `WEB_ORIGIN` and `SESSION_SECRET`; the legacy `ui` service only `API_URL`. Neither gets the backend env file or model volume. Provider keys and database/JWT/storage credentials stay in API/worker services.
+- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. The `web` service receives `API_URL`, `APP_ORIGIN`, `SESSION_SECRET`, `ENV` and `TRUSTED_PROXY_HOPS`; the legacy `ui` service only `API_URL`. Neither gets the backend env file or model volume. Provider keys and database/JWT/storage credentials stay in API/worker services.
 
 
 ## Review and validation
 
-See [docs/PRINCIPAL_CODE_REVIEW.md](docs/PRINCIPAL_CODE_REVIEW.md) for the current review, fixed findings, verification evidence,
-and deployment considerations. Security mappings describe implemented controls, not an OWASP
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and deployment considerations. Run the checks above for verification evidence on your checkout. Security mappings describe implemented controls, not an OWASP
 certification or a penetration-test result. The web UI sets its own CSP and security headers; the legacy Streamlit UI does not,
 so configure HTTPS and appropriate headers/query-string log redaction for it at the production ingress.
 

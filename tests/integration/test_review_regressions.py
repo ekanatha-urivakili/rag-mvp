@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import httpx
@@ -7,12 +8,42 @@ import pytest
 from sqlalchemy import text
 
 from rag.adapters.vectorstore import Hit
+from rag.core.config import get_settings
 from rag.db.models import Document, Job
 from rag.db.session import get_sessionmaker
 from rag.retrieval import retriever
 from rag.worker import loop
 from rag.worker.queue import enqueue
 from tests.integration.conftest import Account
+
+
+@pytest.mark.parametrize("job_type", ["send_email", "reindex", "purge_document"])
+@pytest.mark.parametrize("outcome", ["done", "failed", "queued"])
+async def test_worker_terminal_payload_scrubbing(job_type: str, outcome: str) -> None:
+    payload = {"token": "single-use-token", "value": "keep"}
+    attempts = 1 if outcome == "queued" else get_settings().job_max_attempts
+    async with get_sessionmaker()() as db:
+        job = enqueue(db, job_type, payload)
+        job.status, job.attempts, job.error = "running", attempts, "previous failure"
+        await db.commit()
+        job_id, run_after = job.id, job.run_after
+    started = datetime.now(UTC)
+    async with get_sessionmaker()() as db:
+        if outcome == "done":
+            await loop._finish(db, str(job_id), job_type)
+        else:
+            await loop._fail(db, str(job_id), job_type, payload, attempts, RuntimeError("temporary failure"))
+    async with get_sessionmaker()() as db:
+        final = await db.get(Job, job_id)
+        assert final and final.status == outcome
+        expected_payload = {"redacted": True} if job_type == "send_email" and outcome != "queued" else payload
+        assert final.payload == expected_payload
+        assert final.error == (None if outcome == "done" else "RuntimeError: temporary failure")
+        assert final.attempts == attempts
+        if outcome == "queued":
+            assert final.run_after > started
+        else:
+            assert final.run_after == run_after
 
 
 async def test_retrieval_excludes_stale_partial_deleted_and_other_tenant(
