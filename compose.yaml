@@ -12,6 +12,8 @@ x-app: &app
     SMTP_HOST: mailpit
     SMTP_PORT: "1025"
     OLLAMA_BASE_URL: ${CONTAINER_OLLAMA_BASE_URL:-http://host.containers.internal:11434}
+    # X-Forwarded-For (client IP for rate limits) is trusted only from the web BFF's fixed address.
+    FORWARDED_ALLOW_IPS: 127.0.0.1,172.31.250.2
   volumes:
     - models:/models
   depends_on:
@@ -30,6 +32,10 @@ services:
              uvicorn rag.api.main:app --host 0.0.0.0 --port 8000 --no-server-header --no-access-log
              --proxy-headers --forwarded-allow-ips=$${FORWARDED_ALLOW_IPS:-127.0.0.1}"
     ports: ["127.0.0.1:8000:8000"]
+    networks:
+      default:
+      # Pinned so it never takes the web BFF's address (the only one trusted for X-Forwarded-For).
+      bff: { ipv4_address: 172.31.250.3 }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 10s
@@ -41,6 +47,32 @@ services:
     depends_on:
       api: { condition: service_healthy }
 
+  # Next.js UI + backend-for-frontend. Holds API tokens in an encrypted HttpOnly cookie; the browser
+  # never talks to the API directly. It only reaches the API over the private `bff` network.
+  web:
+    build: { context: ./web, dockerfile: Containerfile }
+    image: localhost/rag-web:latest
+    environment:
+      API_URL: http://api:8000
+      APP_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      ENV: ${ENV:-dev}
+    ports: ["127.0.0.1:3000:3000"]
+    networks:
+      bff: { ipv4_address: 172.31.250.2 }
+    depends_on:
+      api: { condition: service_healthy }
+    read_only: true
+    tmpfs: [/tmp, /app/.next/cache]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/login"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
+  # Legacy Streamlit UI: still serves Receipts, Members and Settings until they move to `web`.
   ui:
     <<: *app
     env_file: []
@@ -101,6 +133,12 @@ services:
     volumes: [mailpit:/data]
     ports: ["127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025", "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"]
     restart: unless-stopped
+
+networks:
+  default:
+  bff:
+    ipam:
+      config: [{ subnet: 172.31.250.0/29 }]
 
 volumes:
   pgdata:

@@ -2,8 +2,8 @@
 # One-command local run: checks prerequisites, runs lint/type/tests, starts the stack, opens the UI.
 #
 #   ./start.sh                 checks + tests + build + start + open browser
-#   ./start.sh --skip-tests    skip lint, mypy and pytest
-#   ./start.sh --no-build      reuse the existing localhost/rag-mvp:latest image
+#   ./start.sh --skip-tests    skip lint, type checks and tests (backend and web)
+#   ./start.sh --no-build      reuse the existing localhost/rag-mvp and localhost/rag-web images
 #   ./start.sh --no-browser    don't open the browser
 #   ./start.sh test            checks + infrastructure + tests only
 #   ./start.sh stop            stop the stack (data volumes are kept)
@@ -11,7 +11,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-UI_URL="http://localhost:8501"
+UI_URL="http://localhost:3000"
+LEGACY_UI_URL="http://localhost:8501"
 API_URL="http://localhost:8000"
 PROJECT="rag-mvp"
 INFRA=(postgres qdrant objectstore mailpit)
@@ -74,18 +75,29 @@ if [[ ! -f .env ]]; then
     -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pg_pass}|" \
     -e "s|^QDRANT_API_KEY=.*|QDRANT_API_KEY=$(secret)|" \
     -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$(secret)|" \
+    -e "s|^SESSION_SECRET=.*|SESSION_SECRET=$(secret)|" \
     -e "s|rag:CHANGE_ME@|rag:${pg_pass}@|" \
     .env
   rm -f .env.bak
   ok "Created .env with generated secrets (git-ignored, mode 600). Add provider keys there if you want cloud models."
 else
   ok ".env exists"
+  # .env files created before the Next.js UI lack its settings; add them without touching anything else.
+  if ! grep -q '^SESSION_SECRET=.' .env; then
+    sed -i.bak '/^SESSION_SECRET=/d' .env && rm -f .env.bak
+    printf '\n# Web UI (Next.js BFF)\nSESSION_SECRET=%s\n' "$(secret)" >>.env
+    ok "Added a generated SESSION_SECRET to .env"
+  fi
+  if grep -q '^PUBLIC_UI_URL=http://localhost:8501' .env; then
+    sed -i.bak 's|^PUBLIC_UI_URL=http://localhost:8501|PUBLIC_UI_URL=http://localhost:3000|' .env && rm -f .env.bak
+    ok "Pointed PUBLIC_UI_URL (email links) at the web UI"
+  fi
 fi
 set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
-for key in JWT_SECRET POSTGRES_PASSWORD QDRANT_API_KEY S3_SECRET_KEY; do
+for key in JWT_SECRET POSTGRES_PASSWORD QDRANT_API_KEY S3_SECRET_KEY SESSION_SECRET; do
   [[ -n "${!key:-}" ]] || die "$key is empty in .env"
 done
 ok "Required secrets are set"
@@ -94,11 +106,12 @@ ok "Required secrets are set"
 step "Checking ports"
 PG_PORT="${POSTGRES_HOST_PORT:-5432}"
 ports=("$PG_PORT" 6333 9000 "${MAILPIT_SMTP_PORT:-1025}" "${MAILPIT_UI_PORT:-8025}")
-[[ "$mode" == all ]] && ports+=(8000 8501)
+[[ "$mode" == all ]] && ports+=(8000 8501 3000)
 ours=$(podman ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Ports}}' 2>/dev/null || true)
 busy=0
 for port in "${ports[@]}"; do
-  if grep -q "127.0.0.1:${port}->" <<<"$ours"; then
+  # Podman collapses adjacent ports into ranges, e.g. 127.0.0.1:6333-6334->6333-6334/tcp.
+  if grep -qE "127\.0\.0\.1:${port}(-[0-9]+)?->" <<<"$ours"; then
     continue
   fi
   if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
@@ -153,6 +166,11 @@ if [[ "$run_tests" == 1 ]]; then
   TEST_DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER:-rag}:${pg_pass_q}@localhost:${PG_PORT}/${POSTGRES_DB:-rag}" \
     QDRANT_URL=http://localhost:6333 S3_ENDPOINT_URL=http://localhost:9000 SMTP_PORT="${MAILPIT_SMTP_PORT:-1025}" \
     uv run pytest -q
+  if command -v npm >/dev/null; then
+    (cd web && npm ci --no-audit --no-fund --silent && npm run -s lint && npm run -s typecheck && npm run -s format:check && npm test --silent)
+  else
+    warn "npm is not installed; skipping web checks (the web image still builds in a container)"
+  fi
   ok "All checks passed"
 fi
 [[ "$mode" == test ]] && exit 0
@@ -161,19 +179,22 @@ fi
 if [[ "$build" == 1 ]]; then
   step "Building localhost/rag-mvp:latest"
   podman build -q -t localhost/rag-mvp:latest -f Containerfile . >/dev/null
-  ok "Image built"
+  podman build -q -t localhost/rag-web:latest -f web/Containerfile web >/dev/null
+  ok "Images built"
 fi
 
-step "Starting api, worker and ui"
+step "Starting api, worker, web and legacy ui"
 compose up -d --no-build
 # The API applies migrations and waits (up to 120s) for local model warmup before it reports healthy.
 wait_for api 240 curl -sf "${API_URL}/healthz"
-wait_for ui 120 curl -sf "${UI_URL}/_stcore/health"
+wait_for web 120 curl -sf -o /dev/null "${UI_URL}/login"
+wait_for ui 120 curl -sf "${LEGACY_UI_URL}/_stcore/health"
 curl -sf "${API_URL}/readyz" >/dev/null || warn "API /readyz reports a dependency down: curl ${API_URL}/readyz"
 
 step "Ready"
 cat <<EOF
   UI       ${UI_URL}
+  Legacy   ${LEGACY_UI_URL}   (Receipts, Members, Settings until they move to the web UI)
   API docs ${API_URL}/docs
   Mailpit  http://localhost:${MAILPIT_UI_PORT:-8025}   (signup verification, invites, password resets)
 

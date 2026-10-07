@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  @apply bg-white text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+}
+
+.prose-chat :where(p, ul, ol, pre, blockquote, table) {
+  @apply my-2;
+}
+.prose-chat :where(ul) {
+  @apply list-disc pl-5;
+}
+.prose-chat :where(ol) {
+  @apply list-decimal pl-5;
+}
+.prose-chat :where(code) {
+  @apply rounded bg-zinc-100 px-1 py-0.5 text-[0.9em] dark:bg-zinc-800;
+}
+.prose-chat :where(pre) {
+  @apply overflow-x-auto rounded-lg bg-zinc-100 p-3 dark:bg-zinc-900;
+}
+.prose-chat :where(pre code) {
+  @apply bg-transparent p-0;
+}
+.prose-chat :where(a) {
+  @apply text-indigo-600 underline underline-offset-2 dark:text-indigo-400;
+}
+.prose-chat :where(h1, h2, h3) {
+  @apply mt-3 mb-1 font-semibold;
+}
+.prose-chat :where(table) {
+  @apply w-full border-collapse text-sm;
+}
+.prose-chat :where(th, td) {
+  @apply border border-zinc-200 px-2 py-1 text-left dark:border-zinc-800;
+}

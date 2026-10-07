@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # --- HTTP hardening ---
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:8501"])
     allowed_hosts: list[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1", "api"])
-    public_ui_url: str = "http://localhost:8501"
+    public_ui_url: str = "http://localhost:3000"
     max_request_body_bytes: int = 30 * 1024 * 1024
 
     # --- Rate limits (requests per window) ---
