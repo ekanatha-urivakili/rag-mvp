@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, Response, status
 
 from rag.api.schemas import (
     AcceptInviteIn,
+    ChangePasswordIn,
     ForgotIn,
     LoginIn,
     RefreshIn,
@@ -110,3 +111,8 @@ async def reset(body: ResetIn, request: Request, db: DB) -> None:
 async def accept_invite(body: AcceptInviteIn, request: Request, response: Response, db: DB) -> TokenOut:
     pair = await service.accept_invite(db, token=body.token, password=body.password, ip=client_ip(request))
     return _set_refresh_cookie(response, pair)
+
+
+@router.post("/password/change", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(body: ChangePasswordIn, ctx: UserCtx, db: DB) -> None:
+    await service.change_password(db, ctx, body.current_password, body.new_password)

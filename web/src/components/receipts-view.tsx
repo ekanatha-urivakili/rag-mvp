@@ -1,12 +1,12 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import Link from "next/link";
-import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { useCan, useMe } from "@/components/app-shell";
+import { FileUpload } from "@/components/file-upload";
 import { Alert, Button, Pagination } from "@/components/ui";
-import { getJson } from "@/lib/client";
-import type { Page, Receipt, ReceiptDetail } from "@/lib/types";
+import { ApiError, getJson, sendJson } from "@/lib/client";
+import type { DocumentItem, Page, Receipt, ReceiptDetail } from "@/lib/types";
 
 const SIZE = 25;
 
@@ -19,12 +19,19 @@ export function ReceiptsView() {
   const allowed = useCan("document:read");
   const canUpload = useCan("document:write");
   const me = useMe();
+  const qc = useQueryClient();
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const receipts = useQuery({
     queryKey: ["receipts", me.tenant.id, page],
     queryFn: ({ signal }) => getJson<Page<Receipt>>(`/api/v1/receipts?limit=${SIZE}&offset=${page * SIZE}`, signal),
     enabled: allowed,
+    refetchInterval: () =>
+      qc
+        .getQueryData<Page<DocumentItem>>(["receipt-uploads"])
+        ?.items.some((item) => ["queued", "processing"].includes(item.status))
+        ? 3000
+        : false,
   });
   const detail = useQuery({
     queryKey: ["receipt", me.tenant.id, selected],
@@ -43,19 +50,12 @@ export function ReceiptsView() {
       <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-xl font-semibold">Receipts</h1>
-          {canUpload && (
-            <Link
-              className="rounded-lg bg-zinc-900 px-3 py-2 text-sm text-white dark:bg-zinc-100 dark:text-zinc-900"
-              href="/documents"
-            >
-              Upload a receipt
-            </Link>
-          )}
         </div>
         <p className="text-sm text-zinc-500">
-          Structured receipt details extracted from your workspace&apos;s documents. Upload a photo or PDF on Documents;
-          it appears here after processing.
+          Scan a receipt photo or upload a PDF here to extract merchant, items and totals.
         </p>
+        {canUpload && <FileUpload kind="receipt" />}
+        <ReceiptUploads />
         <Button variant="secondary" disabled={receipts.isFetching} onClick={() => void receipts.refetch()}>
           Refresh receipts
         </Button>
@@ -209,5 +209,81 @@ function ReceiptCard({ receipt: r }: { receipt: ReceiptDetail }) {
         Extracted values may contain errors. Check the original receipt before relying on them.
       </p>
     </>
+  );
+}
+
+function ReceiptUploads() {
+  const qc = useQueryClient();
+  const uploads = useQuery({
+    queryKey: ["receipt-uploads"],
+    queryFn: ({ signal }) => getJson<Page<DocumentItem>>("/api/v1/documents?kind=receipt&limit=100", signal),
+    refetchInterval: (query) =>
+      query.state.data?.items.some((item) => ["queued", "processing"].includes(item.status)) ? 3000 : false,
+  });
+  useEffect(() => {
+    if (uploads.data) void qc.invalidateQueries({ queryKey: ["receipts"] });
+  }, [uploads.data, qc]);
+  return (
+    <section aria-label="Receipt upload status" className="space-y-2">
+      {uploads.isError && <Alert tone="error">Could not load receipt upload status.</Alert>}
+      {uploads.data?.items.map((item) => (
+        <ReceiptUploadRow key={item.id} item={item} />
+      ))}
+    </section>
+  );
+}
+
+function ReceiptUploadRow({ item }: { item: DocumentItem }) {
+  const canDelete = useCan("document:delete");
+  const qc = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await sendJson("DELETE", `/api/v1/documents/${item.id}`);
+      await Promise.all(
+        ["receipt-uploads", "receipts", "receipt"].map((key) => qc.invalidateQueries({ queryKey: [key] })),
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not delete receipt.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="space-y-2 rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-800">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p>
+          <span className="font-medium">{item.title}</span> · {item.progress?.step ?? item.status}
+        </p>
+        {canDelete &&
+          (confirming ? (
+            <div className="flex items-center gap-2">
+              <span>Delete receipt?</span>
+              <Button variant="danger" disabled={busy} onClick={() => void remove()}>
+                Delete
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button variant="ghost" onClick={() => setConfirming(true)}>
+              Delete receipt
+            </Button>
+          ))}
+      </div>
+      {item.error && <Alert tone="error">{item.error} Upload the receipt again to retry.</Alert>}
+      {error && <Alert tone="error">{error}</Alert>}
+      {item.status === "ready" && (
+        <p className="text-xs text-zinc-500">
+          Processing complete. If no receipt details appear below, structured extraction was unavailable or no receipt
+          was detected.
+        </p>
+      )}
+    </div>
   );
 }

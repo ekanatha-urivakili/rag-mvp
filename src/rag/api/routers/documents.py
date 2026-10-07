@@ -15,12 +15,12 @@ from rag.auth.rbac import Permission
 from rag.core import ratelimit
 from rag.core.audit import audit
 from rag.core.config import get_settings
-from rag.core.errors import AppError, NotFound, PayloadTooLarge
+from rag.core.errors import AppError, NotFound, PayloadTooLarge, UnsupportedMediaType
 from rag.db.models import Chunk, Document, Tenant
 from rag.domain.models import RequestContext
 from rag.ingestion.locking import lock_index
 from rag.ingestion.pipeline import storage_key
-from rag.ingestion.sniff import sanitize_filename, sniff_mime
+from rag.ingestion.sniff import IMAGES, PDF, sanitize_filename, sniff_mime
 from rag.worker.queue import enqueue
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
@@ -50,6 +50,12 @@ def _chunk_count_subq() -> ScalarSelect[int]:
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED, response_model=UploadAccepted)
 async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> UploadAccepted:
+    return await store_upload(file, ctx, db, response, kind="document")
+
+
+async def store_upload(
+    file: UploadFile, ctx: RequestContext, db: DB, response: Response, *, kind: str
+) -> UploadAccepted:
     s = get_settings()
     await ratelimit.hit(db, f"upload:tenant:{ctx.tenant_id}", s.rl_upload_per_tenant, s.rl_upload_window_s)
     data = await _read_bounded(file, s.max_upload_bytes)
@@ -57,6 +63,8 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
         raise AppError("Empty file", code="empty_file")
     title = sanitize_filename(file.filename)
     mime = sniff_mime(data, title)
+    if kind == "receipt" and mime not in {*IMAGES, PDF}:
+        raise UnsupportedMediaType("Receipts must be PDF, JPEG, PNG or WebP")
     content_hash = hashlib.sha256(data).hexdigest()
 
     await lock_index(db)
@@ -64,7 +72,9 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
     live = Document.status != "deleted"
     same = (
         await db.execute(
-            select(Document).where(Document.tenant_id == ctx.tenant_id, Document.content_hash == content_hash, live)
+            select(Document).where(
+                Document.tenant_id == ctx.tenant_id, Document.content_hash == content_hash, Document.kind == kind, live
+            )
         )
     ).scalar_one_or_none()
     if same is not None:
@@ -78,7 +88,9 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
 
     doc = (
         await db.execute(
-            select(Document).where(Document.tenant_id == ctx.tenant_id, Document.title == title, live).with_for_update()
+            select(Document)
+            .where(Document.tenant_id == ctx.tenant_id, Document.title == title, Document.kind == kind, live)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if doc is None:
@@ -87,6 +99,7 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
             tenant_id=ctx.tenant_id,
             uploaded_by=ctx.user_id,
             title=title,
+            kind=kind,
             version=1,
             mime_type=mime,
             size_bytes=len(data),
@@ -111,7 +124,12 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
         await db.rollback()
         existing = (
             await db.execute(
-                select(Document).where(Document.tenant_id == ctx.tenant_id, Document.content_hash == content_hash, live)
+                select(Document).where(
+                    Document.tenant_id == ctx.tenant_id,
+                    Document.content_hash == content_hash,
+                    Document.kind == kind,
+                    live,
+                )
             )
         ).scalar_one()
         response.status_code = status.HTTP_200_OK
@@ -125,8 +143,9 @@ async def list_documents(
     db: DB,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+    kind: Annotated[str, Query(pattern="^(document|receipt)$")] = "document",
 ) -> Page[DocumentOut]:
-    where = (Document.tenant_id == ctx.tenant_id, Document.status != "deleted")
+    where = (Document.tenant_id == ctx.tenant_id, Document.status != "deleted", Document.kind == kind)
     total = (await db.execute(select(func.count()).select_from(Document).where(*where))).scalar_one()
     rows = (
         await db.execute(

@@ -40,6 +40,8 @@ const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
  */
 const ALLOWED: ReadonlyArray<readonly [string, RegExp]> = [
   ["GET", /^me$/],
+  ["PATCH", /^me$/],
+  ["POST", /^auth\/password\/change$/],
   ["POST", /^chat$/],
   ["GET", /^conversations$/],
   ["GET", new RegExp(`^conversations/${UUID}$`)],
@@ -51,6 +53,7 @@ const ALLOWED: ReadonlyArray<readonly [string, RegExp]> = [
   ["GET", new RegExp(`^documents/${UUID}$`)],
   ["DELETE", new RegExp(`^documents/${UUID}$`)],
   ["GET", /^receipts$/],
+  ["POST", /^receipts$/],
   ["GET", new RegExp(`^receipts/${UUID}$`)],
   ["GET", /^members$/],
   ["PATCH", new RegExp(`^members/${UUID}$`)],

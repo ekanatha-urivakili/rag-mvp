@@ -20,7 +20,7 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/v1/[...path]">):
   const session = await openSession((await cookies()).get(sessionCookieName())?.value);
   if (!session) return jsonError(401, "unauthorized", "Not signed in");
 
-  const cap = target === "/v1/documents" && method === "POST" ? MAX_BODY_BYTES : 16 * 1024;
+  const cap = ["/v1/documents", "/v1/receipts"].includes(target) && method === "POST" ? MAX_BODY_BYTES : 16 * 1024;
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (declared > cap) return jsonError(413, "payload_too_large", "Request body too large");
 

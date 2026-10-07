@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
     debug_enabled: false,
   } satisfies Me,
 }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: vi.fn(), refresh: vi.fn() }) }));
 vi.mock("@/components/app-shell", () => ({
   useMe: () => state.me,
   useCan: (permission: string) => state.me.permissions.includes(permission),
@@ -35,7 +36,8 @@ describe("workspace views", () => {
   it("rejects direct management-page access for viewers", () => {
     state.me.permissions = ["document:read"];
     expect(render(MembersView)).toContain("permission to manage");
-    expect(render(SettingsView)).toContain("permission to access");
+    expect(render(SettingsView)).toContain("Appearance");
+    expect(render(SettingsView)).toContain("Profile");
     expect(render(SettingsView)).not.toContain("Create key");
   });
   it("disables own-role edits and escapes malicious member text", () => {
@@ -86,6 +88,6 @@ describe("workspace views", () => {
     client.setQueryData(["receipts", "workspace", 0], { items: [], total: 0 });
     const html = render(ReceiptsView, client);
     expect(html).toContain("No receipts");
-    expect(html).toContain("Upload a photo or PDF on Documents");
+    expect(html).toContain("Scan a receipt photo or upload a PDF here");
   });
 });

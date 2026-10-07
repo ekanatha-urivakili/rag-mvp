@@ -17,7 +17,7 @@ class In(BaseModel):
     @field_validator("*", mode="before")
     @classmethod
     def normalize_text(cls, value: object, info: ValidationInfo) -> object:
-        if isinstance(value, str) and info.field_name not in {"password", "new_password"}:
+        if isinstance(value, str) and info.field_name not in {"password", "new_password", "current_password"}:
             return value.strip()
         return value
 
@@ -64,6 +64,15 @@ class ResetIn(In):
     new_password: str = Field(min_length=1, max_length=128)
 
 
+class ProfileIn(In):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class ChangePasswordIn(In):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
+
+
 class SwitchTenantIn(In):
     tenant_id: uuid.UUID
 
@@ -85,6 +94,7 @@ class TenantOut(Out):
 
 
 class MeOut(Out):
+    name: str | None = None
     user_id: uuid.UUID | None
     email: str | None
     tenant: TenantOut
