@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 
 from rag.api.schemas import ApiKeyCreatedOut, ApiKeyIn, ApiKeyOut
@@ -19,8 +19,19 @@ Admin = Annotated[RequestContext, Depends(require(Permission.APIKEY_MANAGE, user
 
 
 @router.get("", response_model=list[ApiKeyOut])
-async def list_keys(ctx: Admin, db: DB) -> list[ApiKey]:
-    q = select(ApiKey).where(ApiKey.tenant_id == ctx.tenant_id).order_by(ApiKey.created_at.desc())
+async def list_keys(
+    ctx: Admin,
+    db: DB,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+) -> list[ApiKey]:
+    q = (
+        select(ApiKey)
+        .where(ApiKey.tenant_id == ctx.tenant_id)
+        .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     return list((await db.execute(q)).scalars())
 
 

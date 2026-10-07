@@ -83,8 +83,8 @@ export async function POST(req: NextRequest, ctx: RouteContext<"/api/auth/[actio
     if (action === "logout") return await logout(req);
     if (action === "switch-tenant") return await doSwitchTenant(req, raw);
 
+    if (!Object.hasOwn(ACTIONS, action)) return jsonError(404, "not_found", "Not found");
     const spec = ACTIONS[action as keyof typeof ACTIONS];
-    if (!spec) return jsonError(404, "not_found", "Not found");
     const parsed = spec.body.safeParse(raw);
     // Never echo submitted values (passwords, tokens) back in validation errors.
     if (!parsed.success) return jsonError(422, "validation_error", "Invalid request");

@@ -13,7 +13,7 @@ from rag.adapters.llm.base import RouteEntry
 from rag.adapters.storage import get_storage
 from rag.adapters.vectorstore import PointIn, get_vectorstore, point_id
 from rag.core.config import get_settings
-from rag.core.errors import LLMUnavailable
+from rag.core.errors import DOCUMENT_PROCESSING_FAILURE, LLMUnavailable
 from rag.core.logging import log_extra
 from rag.db.models import Chunk, Document, Receipt, User
 from rag.email.outbox import queue_email
@@ -158,7 +158,7 @@ async def on_ingest_failed(db: AsyncSession, payload: dict[str, Any], error: str
     ).scalar_one_or_none()
     if doc is None or doc.version != int(payload["version"]) or doc.status == "deleted":
         return
-    doc.status, doc.error, doc.progress = "failed", error[:500], None
+    doc.status, doc.error, doc.progress = "failed", DOCUMENT_PROCESSING_FAILURE, None
     uploader = await db.get(User, doc.uploaded_by) if doc.uploaded_by else None
     if uploader is not None:
         queue_email(

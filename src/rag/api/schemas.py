@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
 
 from rag.auth.rbac import Role
+from rag.core.errors import DOCUMENT_PROCESSING_FAILURE
 from rag.domain.models import Citation
 
 
@@ -158,6 +159,11 @@ class DocumentOut(Out):
     chunk_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("error")
+    @classmethod
+    def public_error(cls, value: str | None) -> str | None:
+        return DOCUMENT_PROCESSING_FAILURE if value is not None else None
 
 
 # --- Receipts ---

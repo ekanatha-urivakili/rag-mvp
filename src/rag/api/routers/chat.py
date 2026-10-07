@@ -145,6 +145,12 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
         "models": [u.model_dump() for u in usages],
     }
     async with get_sessionmaker()() as db:
+        live = (
+            await db.execute(select(Conversation.id).where(Conversation.id == conversation_id).with_for_update())
+        ).scalar_one_or_none()
+        if live is None:
+            yield _sse("error", {"code": "not_found", "message": "Conversation was deleted."})
+            return
         msg = Message(
             conversation_id=conversation_id,
             role="assistant",
@@ -202,12 +208,18 @@ async def get_conversation(
     db: DB,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     before: Annotated[datetime | None, Query(description="Only messages older than this (load earlier)")] = None,
+    before_id: Annotated[uuid.UUID | None, Query(description="Message cursor tie-breaker")] = None,
 ) -> ConversationDetailOut:
     conv = await _own_conversation(db, ctx, conversation_id)
     stmt = select(Message).where(Message.conversation_id == conv.id)
     if before is not None:
-        stmt = stmt.where(Message.created_at < before)
-    newest_first = list((await db.execute(stmt.order_by(Message.created_at.desc()).limit(limit + 1))).scalars())
+        if before_id is not None:
+            stmt = stmt.where(tuple_(Message.created_at, Message.id) < tuple_(before, before_id))
+        else:
+            stmt = stmt.where(Message.created_at < before)
+    newest_first = list(
+        (await db.execute(stmt.order_by(Message.created_at.desc(), Message.id.desc()).limit(limit + 1))).scalars()
+    )
     return ConversationDetailOut(
         id=conv.id,
         title=conv.title,

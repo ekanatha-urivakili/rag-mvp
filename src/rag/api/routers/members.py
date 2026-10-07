@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 
 from rag.api.schemas import InvitationOut, InviteIn, MemberOut, RoleIn
@@ -17,13 +17,20 @@ Admin = Annotated[RequestContext, Depends(require(Permission.MEMBER_MANAGE, user
 
 
 @router.get("/v1/members", response_model=list[MemberOut])
-async def list_members(ctx: Admin, db: DB) -> list[MemberOut]:
+async def list_members(
+    ctx: Admin,
+    db: DB,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+) -> list[MemberOut]:
     rows = (
         await db.execute(
             select(User.id, User.email, User.is_active, Membership.role, Membership.created_at)
             .join(Membership, Membership.user_id == User.id)
             .where(Membership.tenant_id == ctx.tenant_id)
             .order_by(User.email)
+            .limit(limit)
+            .offset(offset)
         )
     ).all()
     return [
@@ -49,7 +56,12 @@ async def invite(body: InviteIn, ctx: Admin, db: DB) -> dict[str, str]:
 
 
 @router.get("/v1/invitations", response_model=list[InvitationOut])
-async def pending_invitations(ctx: Admin, db: DB) -> list[InvitationOut]:
+async def pending_invitations(
+    ctx: Admin,
+    db: DB,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+) -> list[InvitationOut]:
     rows = (
         await db.execute(
             select(EmailToken)
@@ -59,7 +71,9 @@ async def pending_invitations(ctx: Admin, db: DB) -> list[InvitationOut]:
                 EmailToken.used_at.is_(None),
                 EmailToken.expires_at > datetime.now(UTC),
             )
-            .order_by(EmailToken.created_at.desc())
+            .order_by(EmailToken.created_at.desc(), EmailToken.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
     ).scalars()
     return [

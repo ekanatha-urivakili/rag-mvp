@@ -1,5 +1,7 @@
 # Full-stack review — RAG MVP
 
+Historical review. The current checkout review, including Next.js, is [PRINCIPAL_CODE_REVIEW.md](PRINCIPAL_CODE_REVIEW.md).
+
 Reviewed 6 October 2026 against baseline `527130a` and the working-tree fixes in this review.
 Scope: API, Streamlit, identity/RBAC, tenant isolation, retrieval/LLM graph, ingestion,
 Postgres/Qdrant/S3 consistency, background jobs/email, containers, CI, dependencies and documentation.

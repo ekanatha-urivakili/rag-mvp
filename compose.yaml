@@ -57,6 +57,7 @@ services:
       APP_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       ENV: ${ENV:-dev}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
     ports: ["127.0.0.1:3000:3000"]
     networks:
       bff: { ipv4_address: 172.31.250.2 }

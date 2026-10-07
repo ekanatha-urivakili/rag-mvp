@@ -101,11 +101,12 @@ async def login(client: httpx.AsyncClient, email: str, password: str = PASSWORD)
 
 
 async def make_tenant(client: httpx.AsyncClient, name: str) -> Account:
+    email = f"admin-{uuid.uuid4().hex}@{name}.example.com"
     async with get_sessionmaker()() as db:
-        tenant_id = await bootstrap_admin(db, email=f"admin@{name}.example.com", password=PASSWORD, tenant_name=name)
-    token = await login(client, f"admin@{name}.example.com")
+        tenant_id = await bootstrap_admin(db, email=email, password=PASSWORD, tenant_name=name)
+    token = await login(client, email)
     me = (await client.get("/v1/me", headers={"Authorization": f"Bearer {token}"})).json()
-    return Account(f"admin@{name}.example.com", tenant_id, uuid.UUID(me["user_id"]), token)
+    return Account(email, tenant_id, uuid.UUID(me["user_id"]), token)
 
 
 async def add_member(client: httpx.AsyncClient, tenant: Account, role: Role, name: str | None = None) -> Account:

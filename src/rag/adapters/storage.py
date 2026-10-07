@@ -57,7 +57,9 @@ class ObjectStorage:
             for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
                 if keys:
-                    self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": keys})
+                    result = self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": keys})
+                    if result.get("Errors"):
+                        raise RuntimeError("Object storage could not delete all document files")
 
         await asyncio.to_thread(_delete)
 

@@ -49,6 +49,8 @@ def _check_image(data: bytes, mime: str) -> str:
     try:
         with Image.open(io.BytesIO(data)) as img:  # header only; pixels are decoded in the worker
             size = img.width * img.height
+    except Image.DecompressionBombError as e:
+        raise UnsupportedMediaType("Image dimensions are too large") from e
     except (UnidentifiedImageError, OSError) as e:
         raise UnsupportedMediaType("Corrupt image file") from e
     if size > get_settings().max_image_pixels:

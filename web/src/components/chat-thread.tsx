@@ -64,7 +64,11 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
     const el = scrollRef.current;
     const before = el?.scrollHeight ?? 0;
     try {
-      const params = new URLSearchParams({ limit: String(OLDER_PAGE), before: oldest.created_at });
+      const params = new URLSearchParams({
+        limit: String(OLDER_PAGE),
+        before: oldest.created_at,
+        before_id: oldest.id,
+      });
       const page = await getJson<ConversationDetail>(`/api/v1/conversations/${conversationId}?${params}`);
       setMessages((m) => [...page.messages, ...m]);
       setHasMore(page.has_more);

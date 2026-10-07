@@ -309,6 +309,7 @@ async def reset_password(db: AsyncSession, *, token: str, new_password: str, ip:
 
 async def invite(db: AsyncSession, ctx: RequestContext, *, email: str, role: Role) -> None:
     s = get_settings()
+    await ratelimit.hit(db, f"invite:tenant:{ctx.tenant_id}", s.rl_invite_per_tenant, s.rl_invite_window_s)
     email = normalize_email(email)
     already = (
         await db.execute(

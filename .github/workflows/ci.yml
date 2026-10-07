@@ -84,8 +84,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
-      - run: uv run python evals/run_eval.py --tenant-id "${{ vars.EVAL_TENANT_ID }}" --min-recall 0.85 --min-faithfulness 0.90
+      - run: uv run python evals/run_eval.py --tenant-id "$EVAL_TENANT_ID" --min-recall 0.85 --min-faithfulness 0.90
         env:
+          EVAL_TENANT_ID: ${{ vars.EVAL_TENANT_ID }}
           DATABASE_URL: ${{ secrets.EVAL_DATABASE_URL }}
           QDRANT_URL: ${{ secrets.EVAL_QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.EVAL_QDRANT_API_KEY }}

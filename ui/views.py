@@ -152,8 +152,8 @@ def _render_sources(citations: list[dict[str, Any]]) -> None:
     with st.expander(f"Sources ({len(citations)})"):
         for c in citations:
             page = f", page {c['page']}" if c.get("page") else ""
-            st.markdown(f"**[{c['n']}] {c['source']}{page}**")
-            st.caption(c["snippet"])
+            st.text(f"[{c['n']}] {c['source']}{page}")
+            st.text(c["snippet"])
 
 
 def _feedback(message_id: str) -> None:
@@ -187,7 +187,7 @@ def chat() -> None:
             detail = request("GET", f"/v1/conversations/{conv_id}")
             for m in detail["messages"]:
                 with st.chat_message(m["role"]):
-                    st.markdown(m["content"])
+                    st.text(m["content"])
                     if m["role"] == "assistant":
                         _render_sources(m["citations"])
                         if m.get("model"):
@@ -212,7 +212,7 @@ def chat() -> None:
     if not question:
         return
     with st.chat_message("user"):
-        st.markdown(question)
+        st.text(question)
     with st.chat_message("assistant"):
         status = st.empty()
         result: dict[str, Any] = {"citations": [], "done": None, "debug": None, "answer": None, "model": None}
@@ -247,10 +247,12 @@ def chat() -> None:
 
         answer = st.empty()
         try:
-            with answer.container():
-                streamed = st.write_stream(tokens())
+            streamed = ""
+            for token in tokens():
+                streamed += token
+                answer.text(streamed)
             if result["answer"] is not None and result["answer"] != streamed:
-                answer.markdown(result["answer"])
+                answer.text(result["answer"])
         except ApiError as e:
             _error(e)
         status.empty()
@@ -325,10 +327,10 @@ def _money(r: dict[str, Any], key: str) -> str:
 
 
 def _receipt_card(r: dict[str, Any]) -> None:
-    st.markdown(f"#### {r['merchant_name'] or 'Unknown merchant'}")
+    st.text(r["merchant_name"] or "Unknown merchant")
     details = [v for v in (r["merchant_address"], r["merchant_phone"]) if v]
     if details:
-        st.caption(" · ".join(details))
+        st.text(" · ".join(details))
     when = " ".join(v for v in (r["purchased_on"], (r["purchased_time"] or "")[:5]) if v) or "—"
     card = " ".join(v for v in (r["card_brand"], f"•••• {r['card_last4']}" if r["card_last4"] else None) if v)
     c1, c2, c3, c4 = st.columns(4)
@@ -350,14 +352,14 @@ def _receipt_card(r: dict[str, Any]) -> None:
         hide_index=True,
     )
     for w in r["warnings"]:
-        st.warning(w, icon=":material/rule:")
+        st.text(w)
     st.caption(f":material/smart_toy: Extracted by {r['model']} · {r['provider']}")
 
 
 def _upload_receipt(name: str, data: bytes) -> None:
     """Uploads a receipt from the chat box and shows live progress, including the model in use."""
     with st.chat_message("user"):
-        st.markdown(f":material/receipt_long: {name}")
+        st.text(name)
     with st.chat_message("assistant"):
         try:
             doc_id = request("POST", "/v1/documents", files={"file": (name, data)})["document_id"]
@@ -441,9 +443,11 @@ def members() -> None:
                 st.success(f"Invitation sent to {email}")
             except ApiError as e:
                 _error(e)
+    member_page = st.number_input("Member page", min_value=1, max_value=1001, value=1, step=1)
+    invitation_page = st.number_input("Invitation page", min_value=1, max_value=1001, value=1, step=1)
     try:
-        rows = request("GET", "/v1/members")
-        pending = request("GET", "/v1/invitations")
+        rows = request("GET", "/v1/members", params={"limit": 100, "offset": (member_page - 1) * 100})
+        pending = request("GET", "/v1/invitations", params={"limit": 100, "offset": (invitation_page - 1) * 100})
     except ApiError as e:
         _error(e)
         return
@@ -488,10 +492,11 @@ def settings() -> None:
                     st.code(created["api_key"], language=None)
                 except ApiError as e:
                     _error(e)
+        key_page = st.number_input("API key page", min_value=1, max_value=1001, value=1, step=1)
         try:
-            for k in request("GET", "/v1/api-keys"):
+            for k in request("GET", "/v1/api-keys", params={"limit": 100, "offset": (key_page - 1) * 100}):
                 c1, c2, c3 = st.columns([4, 2, 1])
-                c1.write(f"{k['name']} · `rk_{k['key_prefix']}_…`")
+                c1.text(f"{k['name']} · rk_{k['key_prefix']}_…")
                 c2.write("revoked" if k["revoked_at"] else k["role"])
                 if not k["revoked_at"] and c3.button("Revoke", key=f"revoke-{k['id']}"):
                     request("DELETE", f"/v1/api-keys/{k['id']}")

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { NextResponse } from "next/server";
+import { isIP } from "node:net";
 
 /** Same error envelope as the API, so the browser handles one shape. Never includes internals. */
 export function jsonError(status: number, code: string, message: string): NextResponse {
@@ -19,15 +20,16 @@ export function isSameOrigin(headers: Headers, appOrigin: string): boolean {
 
 /**
  * Client IP for API rate limiting. X-Forwarded-For is client-controlled except for the entries appended by
- * trusted hops, so take the entry `hops` from the right (Next.js appends the socket peer when absent).
+ * trusted hops, so take the entry `hops` from the right. Next.js preserves a supplied header.
  */
 export function clientIp(headers: Headers, hops: number): string | null {
+  if (hops === 0) return null;
   const parts = (headers.get("x-forwarded-for") ?? "")
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
   const ip = parts[parts.length - hops];
-  return ip && /^[0-9a-fA-F:.]{2,45}$/.test(ip) ? ip : null;
+  return ip && isIP(ip) ? ip : null;
 }
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -61,6 +63,23 @@ export function resolveProxyTarget(method: string, segments: readonly string[]):
 }
 
 export class BodyTooLarge extends Error {}
+
+export function boundedBody(body: ReadableStream<Uint8Array> | null, maxBytes: number) {
+  let total = 0;
+  let exceeded = false;
+  const stream = body?.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          exceeded = true;
+          controller.error(new BodyTooLarge());
+        } else controller.enqueue(chunk);
+      },
+    }),
+  );
+  return { stream: stream ?? null, exceeded: () => exceeded };
+}
 
 /** Reads a JSON body with a hard byte cap, including chunked bodies without Content-Length (OWASP API4). */
 export async function readJsonBounded(req: Request, maxBytes: number): Promise<unknown> {

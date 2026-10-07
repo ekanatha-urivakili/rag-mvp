@@ -1,6 +1,7 @@
 """Image normalisation and OCR (RapidOCR: PaddleOCR PP-OCR models on ONNX Runtime, CPU, bundled in the wheel)."""
 
 import io
+import math
 import re
 from functools import cache
 from typing import Any
@@ -87,7 +88,13 @@ def ocr(img: PILImage.Image) -> str:
 
 
 def render_pdf_page(page: Any, dpi: int = 200) -> PILImage.Image:
-    pix = page.get_pixmap(dpi=dpi)
+    import pymupdf
+
+    width = math.ceil(page.rect.width * dpi / 72)
+    height = math.ceil(page.rect.height * dpi / 72)
+    if width <= 0 or height <= 0 or width * height > get_settings().max_image_pixels:
+        raise ValueError("PDF page dimensions are too large")
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
     return PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
 

