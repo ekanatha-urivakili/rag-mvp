@@ -27,7 +27,7 @@ podman compose exec api rag admin create --email you@example.com --tenant demo  
 | --- | --- |
 | http://localhost:8501 | UI |
 | http://localhost:8000/docs | OpenAPI (disabled when `ENV=prod`) |
-| http://localhost:8025 | Project Mailpit inbox (invites and password resets). Override with `MAILPIT_UI_PORT` |
+| http://localhost:8025 | Project Mailpit inbox (signup verification, invites and password resets). Override with `MAILPIT_UI_PORT` |
 
 **Ollama and containers.** Ollama runs on the host so it can use the Metal GPU. Containers reach it through `host.containers.internal`, which only works when Ollama listens on all interfaces. That also exposes Ollama, which has no authentication, to your LAN. Keep the macOS firewall on, or use a cloud `orchestration` route instead.
 
@@ -62,6 +62,24 @@ The integration suite covers these flows end to end, including real emails read 
 
 `tests/unit/test_route_coverage.py` fails CI if someone adds a route without an auth dependency.
 
+## Signup
+
+The sign-in page includes **New here? Sign up**. Enter your email, open the verification link
+from Mailpit (or your configured SMTP provider), then choose a workspace name and password.
+For local development, open **http://localhost:8025** to read the email. Mailpit captures
+messages instead of delivering them to your normal inbox. Its messages persist in this
+project’s `mailpit` Podman volume across container restarts.
+Verification creates a new private workspace and makes you its admin. It never adds you to
+an existing workspace; those still require invitations. Workspace names include a unique suffix.
+
+Signup links expire after 30 minutes and are single-use. Accounts and workspaces are created
+only after email verification. Existing-email requests receive the same 202 response without
+changing the account. Passwords follow the existing 12–128 character policy and are hashed
+with Argon2id. Signup initiation and verification are rate-limited.
+
+Set `SIGNUP_ENABLED=false` for invitation-only operation. Apply `alembic upgrade head` when
+running on the host; Compose applies migration `0002` automatically on API startup.
+
 ## OWASP coverage
 
 | Risk (Web 2021 / API 2023) | Implementation |
@@ -69,7 +87,7 @@ The integration suite covers these flows end to end, including real emails read 
 | **API1 BOLA / A01** | `tenant_id` and `user_id` always come from the token, never the request body. Tenant-owned resource queries filter by the authenticated tenant. Retrieval also checks Postgres for ready documents at the exact indexed version, excluding partial, failed, deleted and superseded content. Conversations and feedback also filter by `user_id`, so admins can't read other users' chats. The Qdrant tenant filter is applied inside `VectorStore`. Another tenant's IDs return 404, the same as missing IDs. UUIDv4 IDs. |
 | **API2 Broken auth / A07** | argon2id with transparent rehash. 12–128 character policy (rejects passwords containing the email local-part). JWT is HS256 with the algorithm pinned and `iss`/`aud`/`exp`/`nbf`/`iat`/`jti`/`sid` required plus a `typ` check. Access TTL is 15 min. Sub-second `iat` makes revocation via `tokens_valid_after` (password reset) exact. Refresh tokens are opaque and stored as SHA-256 hashes. They rotate on every use, and reusing a rotated token revokes the whole token family. JWT `sid` binds access tokens to that family; each request checks a live refresh record, so logout and replay detection also revoke access immediately. Password reset invalidates all outstanding reset links and serializes against login/refresh. Refresh cookie: `HttpOnly`, `SameSite=Strict`, path-scoped. Login failures look identical whether or not the account exists, including timing (a dummy hash is verified). |
 | **API3 BOPLA** | Every input schema sets `extra="forbid"` (no mass assignment). Explicit response models, so hashes and secrets never serialize. Validation errors never echo submitted values. |
-| **API4 Resource consumption** | Postgres fixed-window rate limits shared across replicas: login per IP and per email, reset/accept per IP, forgot-password per IP and per email, chat per tenant and per user, uploads per tenant. 25 MB upload cap (streamed and bounded) plus an actual-byte request-body cap, including chunked multipart requests without an honest Content-Length. Zip-bomb guard on DOCX. Pagination caps. 4k-character questions. LLM `max_tokens` and timeouts. Graph `recursion_limit`, with at most 1 rewrite. |
+| **API4 Resource consumption** | Postgres fixed-window rate limits shared across replicas: login per IP and per email, signup per IP and per email, verification/reset/accept per IP, forgot-password per IP and per email, chat per tenant and per user, uploads per tenant. 25 MB upload cap (streamed and bounded) plus an actual-byte request-body cap, including chunked multipart requests without an honest Content-Length. Zip-bomb guard on DOCX. Pagination caps. 4k-character questions. LLM `max_tokens` and timeouts. Graph `recursion_limit`, with at most 1 rewrite. |
 | **API5 BFLA** | `require(Permission)` dependency on every route. The role is read from the DB on every request, so a demotion or removal applies immediately. RBAC matrix test, route-coverage test, last-admin and self-change guardrails. |
 | **API6 Sensitive flows** | Invite and reset are single-use, short-lived and hashed at rest. Forgot-password always returns 202 (no account enumeration). |
 | **API7 SSRF / A10** | No user-supplied URLs are ever fetched. HTML is parsed from the uploaded bytes only. Email links are built only from `PUBLIC_UI_URL`. |

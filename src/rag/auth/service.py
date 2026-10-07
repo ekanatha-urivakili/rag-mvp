@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.auth.passwords import hash_password, validate_password_policy, verify_password
@@ -163,6 +164,66 @@ async def switch_tenant(db: AsyncSession, ctx: RequestContext, tenant_id: uuid.U
         raise Forbidden()
     pair, _ = await _issue_tokens(db, ctx.user_id, tenant_id)
     await db.commit()
+    return pair
+
+
+# --- Signup --------------------------------------------------------------------
+
+
+async def signup(db: AsyncSession, *, email: str, ip: str | None) -> None:
+    s = get_settings()
+    if not s.signup_enabled:
+        raise Forbidden("Signup is disabled. Ask your workspace admin for an invitation.")
+    email = normalize_email(email)
+    await ratelimit.hit(db, f"signup:ip:{ip}", s.rl_signup_per_ip, s.rl_signup_window_s)
+    await ratelimit.hit(db, f"signup:email:{email}", 3, s.rl_signup_window_s)
+    if (await db.execute(select(User.id).where(User.email == email))).scalar_one_or_none() is not None:
+        return
+    raw = new_opaque_token()
+    db.add(
+        EmailToken(
+            type="signup",
+            email=email,
+            token_hash=hash_token(raw),
+            expires_at=_now() + timedelta(seconds=s.signup_ttl_s),
+        )
+    )
+    queue_email(
+        db,
+        template="signup",
+        to=email,
+        context={
+            "link": f"{s.public_ui_url}/verify_signup?token={raw}",
+            "expires_minutes": s.signup_ttl_s // 60,
+        },
+    )
+    await db.commit()
+
+
+async def verify_signup(
+    db: AsyncSession, *, token: str, password: str, workspace_name: str, ip: str | None
+) -> TokenPair:
+    s = get_settings()
+    if not s.signup_enabled:
+        raise Forbidden("Signup is disabled. Ask your workspace admin for an invitation.")
+    await ratelimit.hit(db, f"signup-verify:ip:{ip}", 20, s.rl_signup_window_s)
+    tok = await _consume_email_token(db, token, "signup")
+    validate_password_policy(password, tok.email)
+    name = workspace_name.strip()
+    if not name:
+        raise AppError("Workspace name is required", code="invalid_workspace")
+    user = User(id=uuid.uuid4(), email=tok.email, password_hash=await asyncio.to_thread(hash_password, password))
+    tenant = Tenant(id=uuid.uuid4(), name=f"{name} ({user.id.hex[:12]})")
+    db.add_all([user, tenant])
+    try:
+        await db.flush()
+        db.add(Membership(user_id=user.id, tenant_id=tenant.id, role=Role.ADMIN.value))
+        audit(db, action="auth.signup", tenant_id=tenant.id, actor_user_id=user.id, ip=ip)
+        pair, _ = await _issue_tokens(db, user.id, tenant.id)
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise Conflict("This account already exists. Sign in or reset your password.", code="account_exists") from exc
     return pair
 
 

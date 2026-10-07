@@ -78,7 +78,7 @@ class EmailToken(Base):
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = _created()
-    __table_args__ = (CheckConstraint("type in ('invite','password_reset')", name="ck_email_token_type"),)
+    __table_args__ = (CheckConstraint("type in ('invite','password_reset','signup')", name="ck_email_token_type"),)
 
 
 class RefreshToken(Base):

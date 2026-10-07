@@ -10,6 +10,8 @@ PUBLIC = {
     ("GET", "/healthz"),
     ("GET", "/readyz"),
     ("POST", "/v1/auth/login"),
+    ("POST", "/v1/auth/signup"),
+    ("POST", "/v1/auth/signup/verify"),
     ("POST", "/v1/auth/refresh"),
     ("POST", "/v1/auth/password/forgot"),
     ("POST", "/v1/auth/password/reset"),

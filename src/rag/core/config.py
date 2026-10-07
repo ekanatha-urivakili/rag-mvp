@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     refresh_token_ttl_s: int = 14 * 24 * 3600
     invite_ttl_s: int = 72 * 3600
     password_reset_ttl_s: int = 30 * 60
+    signup_ttl_s: int = Field(default=30 * 60, gt=0)
+    signup_enabled: bool = True
+    rl_signup_per_ip: int = Field(default=5, gt=0)
+    rl_signup_window_s: int = Field(default=3600, gt=0)
     password_min_length: int = 12
     password_max_length: int = 128
     refresh_cookie_name: str = "rag_refresh"

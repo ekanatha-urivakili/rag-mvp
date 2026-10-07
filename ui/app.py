@@ -15,6 +15,7 @@ except ApiError as exc:
     st.error(exc.message)
     st.stop()
 public = [
+    st.Page(views.verify_signup, title="Verify email", url_path="verify_signup", icon=":material/mail:"),
     st.Page(views.reset_password, title="Reset password", url_path="reset_password", icon=":material/key:"),
     st.Page(views.accept_invite, title="Accept invite", url_path="accept_invite", icon=":material/mail:"),
 ]

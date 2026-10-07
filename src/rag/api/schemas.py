@@ -31,6 +31,16 @@ class LoginIn(In):
     tenant_id: uuid.UUID | None = None
 
 
+class SignupIn(In):
+    email: EmailStr
+
+
+class VerifySignupIn(In):
+    token: str = Field(min_length=16, max_length=256)
+    password: str = Field(min_length=1, max_length=128)
+    workspace_name: str = Field(min_length=1, max_length=160)
+
+
 class RefreshIn(In):
     refresh_token: str | None = Field(default=None, max_length=256)
 

@@ -26,12 +26,49 @@ def login() -> None:
                 st.rerun()
             except ApiError as e:
                 _error(e)
+    with st.expander("New here? Sign up"), st.form("signup"):
+        st.caption("Create a private workspace. We’ll verify your email first.")
+        signup_email = st.text_input("Your email", autocomplete="email")
+        if st.form_submit_button("Sign up"):
+            try:
+                public_post("/v1/auth/signup", {"email": signup_email})
+                st.success(
+                    "If you can register with this email, a verification link is on its way. "
+                    "Already have an account? Sign in or reset your password."
+                )
+            except ApiError as e:
+                _error(e)
     with st.expander("Forgot your password?"), st.form("forgot"):
         email = st.text_input("Account email")
         if st.form_submit_button("Send reset link"):
             try:
                 public_post("/v1/auth/password/forgot", {"email": email})
                 st.success("If an account exists for that email, a reset link is on its way.")
+            except ApiError as e:
+                _error(e)
+
+
+def verify_signup() -> None:
+    st.title("Create your account")
+    token = st.session_state.get("link_token")
+    if not token:
+        st.warning("Open this page from the link in your verification email.")
+        if st.button("Back to sign in"):
+            st.switch_page(login)
+        return
+    with st.form("verify-signup"):
+        name = st.text_input("Workspace name", max_chars=160)
+        pw = st.text_input("Password (12–128 characters)", type="password", autocomplete="new-password")
+        pw2 = st.text_input("Repeat password", type="password", autocomplete="new-password")
+        if st.form_submit_button("Create account", type="primary"):
+            if pw != pw2:
+                st.error("Passwords don't match.")
+                return
+            try:
+                data = public_post("/v1/auth/signup/verify", {"token": token, "password": pw, "workspace_name": name})
+                clear_session()
+                store_tokens(data)
+                st.rerun()
             except ApiError as e:
                 _error(e)
 
