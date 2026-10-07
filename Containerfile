@@ -9,6 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TIKTOKEN_CACHE_DIR=/opt/tiktoken \
     PATH="/app/.venv/bin:$PATH"
 
+# OpenCV (pulled in by RapidOCR for receipt OCR) needs these shared libraries at import time.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgl1 libglib2.0-0t64 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 

@@ -26,6 +26,7 @@ else:
     pages = [st.Page(views.chat, title="Chat", icon=":material/forum:", default=True)]
     if can("document:read"):
         pages.append(st.Page(views.documents, title="Documents", url_path="documents", icon=":material/description:"))
+        pages.append(st.Page(views.receipts, title="Receipts", url_path="receipts", icon=":material/receipt_long:"))
     if can("member:manage"):
         pages.append(st.Page(views.members, title="Members", url_path="members", icon=":material/group:"))
     if can("apikey:manage") or can("audit:read"):

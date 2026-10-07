@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+from typing import Any
 
+from rag.core.config import get_settings
 from rag.ingestion import sniff
 
 
@@ -7,6 +9,7 @@ from rag.ingestion import sniff
 class Page:
     number: int | None
     markdown: str
+    ocr: bool = False  # text came from OCR of an image or scanned page
 
 
 def _pdf(data: bytes) -> list[Page]:
@@ -16,8 +19,23 @@ def _pdf(data: bytes) -> list[Page]:
     with pymupdf.open(stream=data, filetype="pdf") as doc:  # type: ignore[no-untyped-call]
         if doc.needs_pass:
             raise ValueError("Encrypted PDFs are not supported")
+        if not any(page.get_text().strip() for page in doc):
+            return _scanned_pdf(doc)
         pages = pymupdf4llm.to_markdown(doc, page_chunks=True, show_progress=False)
     return [Page(number=int(p["metadata"].get("page", i + 1)), markdown=p["text"]) for i, p in enumerate(pages)]
+
+
+def _scanned_pdf(doc: Any) -> list[Page]:
+    from rag.receipts.ocr import ocr, render_pdf_page
+
+    pages = list(doc)[: get_settings().max_ocr_pages]
+    return [Page(number=i + 1, markdown=ocr(render_pdf_page(page)), ocr=True) for i, page in enumerate(pages)]
+
+
+def _image(data: bytes) -> list[Page]:
+    from rag.receipts.ocr import load_image, ocr
+
+    return [Page(number=1, markdown=ocr(load_image(data)), ocr=True)]
 
 
 def _docx(data: bytes) -> list[Page]:
@@ -61,4 +79,6 @@ def parse(data: bytes, mime: str) -> list[Page]:
         return _docx(data)
     if mime == sniff.HTML:
         return _html(data)
+    if mime in sniff.IMAGES:
+        return _image(data)
     return [Page(number=None, markdown=data.decode("utf-8", errors="replace"))]

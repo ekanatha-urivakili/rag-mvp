@@ -23,10 +23,14 @@ class OllamaLLM:
         self.model = model
         self._think: bool = bool(options.get("think", False))
         self._keep_alive: str = str(options.get("keep_alive", "30m"))
+        self._num_ctx: dict[str, int] = {"num_ctx": int(options["num_ctx"])} if "num_ctx" in options else {}
 
     @staticmethod
-    def _msgs(messages: list[Message]) -> list[dict[str, str]]:
-        return [{"role": m.role, "content": m.content} for m in messages]
+    def _msgs(messages: list[Message]) -> list[dict[str, Any]]:
+        return [
+            {"role": m.role, "content": m.content, **({"images": [i.data for i in m.images]} if m.images else {})}
+            for m in messages
+        ]
 
     async def complete(
         self,
@@ -41,7 +45,7 @@ class OllamaLLM:
                 model=self.model,
                 messages=self._msgs(messages),
                 format=strict_json_schema(schema) if schema else None,
-                options={"temperature": temperature, "num_predict": max_tokens},
+                options={"temperature": temperature, "num_predict": max_tokens, **self._num_ctx},
                 think=self._think,
                 keep_alive=self._keep_alive,
             )
@@ -59,7 +63,7 @@ class OllamaLLM:
         resp = await self._client.chat(
             model=self.model,
             messages=self._msgs(messages),
-            options={"temperature": 0.2, "num_predict": max_tokens},
+            options={"temperature": 0.2, "num_predict": max_tokens, **self._num_ctx},
             think=self._think,
             keep_alive=self._keep_alive,
             stream=True,

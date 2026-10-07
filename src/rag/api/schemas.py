@@ -1,5 +1,6 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
@@ -153,9 +154,52 @@ class DocumentOut(Out):
     version: int
     status: str
     error: str | None
+    progress: dict[str, str] | None
     chunk_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+# --- Receipts ---
+class ReceiptItemOut(Out):
+    description: str
+    quantity: Decimal | None
+    unit_price: Decimal | None
+    amount: Decimal
+
+
+class ReceiptDiscountOut(Out):
+    description: str
+    amount: Decimal
+
+
+class ReceiptOut(Out):
+    document_id: uuid.UUID
+    title: str
+    merchant_name: str | None
+    merchant_address: str | None
+    merchant_phone: str | None
+    purchased_on: date | None
+    purchased_time: time | None
+    currency: str | None
+    item_count: int | None
+    subtotal: Decimal | None
+    discount_total: Decimal | None
+    tax: Decimal | None
+    tip: Decimal | None
+    total: Decimal | None
+    payment_method: str | None
+    card_brand: str | None
+    card_last4: str | None
+    warnings: list[str]
+    provider: str
+    model: str
+    created_at: datetime
+
+
+class ReceiptDetailOut(ReceiptOut):
+    items: list[ReceiptItemOut]
+    discounts: list[ReceiptDiscountOut]
 
 
 class UploadAccepted(Out):
@@ -191,6 +235,8 @@ class MessageOut(Out):
     role: str
     content: str
     citations: list[Citation]
+    provider: str | None
+    model: str | None
     created_at: datetime
 
 

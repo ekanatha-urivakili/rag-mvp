@@ -12,7 +12,11 @@ DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 HTML = "text/html"
 MARKDOWN = "text/markdown"
 TEXT = "text/plain"
-ALLOWED = frozenset({PDF, DOCX, HTML, MARKDOWN, TEXT})
+JPEG = "image/jpeg"
+PNG = "image/png"
+WEBP = "image/webp"
+IMAGES = frozenset({JPEG, PNG, WEBP})
+ALLOWED = frozenset({PDF, DOCX, HTML, MARKDOWN, TEXT, *IMAGES})
 
 _SAFE_NAME = re.compile(r"[^\w.\- ()]+", re.UNICODE)
 
@@ -39,6 +43,19 @@ def _check_docx(data: bytes) -> None:
         raise UnsupportedMediaType("Corrupt .docx file") from e
 
 
+def _check_image(data: bytes, mime: str) -> str:
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:  # header only; pixels are decoded in the worker
+            size = img.width * img.height
+    except (UnidentifiedImageError, OSError) as e:
+        raise UnsupportedMediaType("Corrupt image file") from e
+    if size > get_settings().max_image_pixels:
+        raise UnsupportedMediaType("Image dimensions are too large")  # decompression-bomb guard
+    return mime
+
+
 def sniff_mime(data: bytes, filename: str) -> str:
     """Detects type from content (magic bytes), never from the client-supplied Content-Type."""
     if data.startswith(b"%PDF-"):
@@ -46,6 +63,12 @@ def sniff_mime(data: bytes, filename: str) -> str:
     if data.startswith(b"PK\x03\x04"):
         _check_docx(data)
         return DOCX
+    if data.startswith(b"\xff\xd8\xff"):
+        return _check_image(data, JPEG)
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return _check_image(data, PNG)
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return _check_image(data, WEBP)
     if b"\x00" in data[:8192]:
         raise UnsupportedMediaType("Unsupported binary file type")
     try:
@@ -59,4 +82,4 @@ def sniff_mime(data: bytes, filename: str) -> str:
         return MARKDOWN
     if ext in {".txt", ""}:
         return TEXT
-    raise UnsupportedMediaType("Allowed types: PDF, DOCX, HTML, Markdown, plain text")
+    raise UnsupportedMediaType("Allowed types: PDF, DOCX, HTML, Markdown, plain text, JPEG, PNG, WebP")
