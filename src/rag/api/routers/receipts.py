@@ -1,10 +1,11 @@
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, UploadFile
 from sqlalchemy import Select, func, select
 
-from rag.api.schemas import Page, ReceiptDetailOut, ReceiptOut
+from rag.api.routers.documents import Writer, store_upload
+from rag.api.schemas import Page, ReceiptDetailOut, ReceiptOut, UploadAccepted
 from rag.auth.deps import DB, require
 from rag.auth.rbac import Permission
 from rag.core.errors import NotFound
@@ -25,6 +26,7 @@ def _visible(ctx: RequestContext) -> Select[Receipt, str]:
             Receipt.tenant_id == ctx.tenant_id,
             Document.tenant_id == ctx.tenant_id,
             Document.status == "ready",
+            Document.kind == "receipt",
             Document.version == Receipt.version,
         )
     )
@@ -58,3 +60,8 @@ async def get_receipt(document_id: uuid.UUID, ctx: Reader, db: DB) -> ReceiptDet
         raise NotFound("Receipt not found")  # same response for other tenants' IDs
     receipt, title = row
     return ReceiptDetailOut.model_validate(_fields(receipt, title))
+
+
+@router.post("", status_code=202, response_model=UploadAccepted)
+async def upload_receipt(file: UploadFile, ctx: Writer, db: DB, response: Response) -> UploadAccepted:
+    return await store_upload(file, ctx, db, response, kind="receipt")

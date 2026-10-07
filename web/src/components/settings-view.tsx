@@ -3,6 +3,8 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { useCan, useMe } from "@/components/app-shell";
+import { ThemeSettings } from "@/components/theme";
+import { ProfileSettings } from "@/components/profile-settings";
 import { Alert, Button, Field, Pagination } from "@/components/ui";
 import { ApiError, getJson, sendJson } from "@/lib/client";
 import type { ApiKey, AuditEvent, CreatedApiKey, Role } from "@/lib/types";
@@ -17,7 +19,8 @@ export function SettingsView() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl space-y-8 px-4 py-6">
         <h1 className="text-xl font-semibold">Settings</h1>
-        {!keys && !audit && <Alert tone="info">You don&apos;t have permission to access workspace settings.</Alert>}
+        <ThemeSettings />
+        <ProfileSettings />
         {keys && <ApiKeys />}
         {audit && <AuditLog />}
       </div>
@@ -94,10 +97,28 @@ function ApiKeys() {
   return (
     <section aria-labelledby="api-keys-heading" className="space-y-4">
       <h2 id="api-keys-heading" className="text-lg font-semibold">
-        API keys
+        API keys{" "}
+        <span className="group relative inline-flex align-middle">
+          <button
+            type="button"
+            aria-label="What are API keys?"
+            aria-describedby="api-key-help"
+            className="rounded-full border border-zinc-400 px-1.5 text-xs"
+          >
+            !
+          </button>
+          <span
+            id="api-key-help"
+            role="tooltip"
+            className="absolute left-0 top-full z-20 mt-2 hidden w-64 rounded-lg bg-zinc-900 p-3 text-sm font-normal text-white shadow-lg group-hover:block group-focus-within:block"
+          >
+            API keys let scripts and integrations access this workspace without your password. You do not need a key to
+            use this app. Keep keys secret and revoke unused keys.
+          </span>
+        </span>
       </h2>
       <p className="text-sm text-zinc-500">
-        Keys grant access to this workspace. Give each integration the least access it needs.
+        Optional: create a key only when connecting a script or external integration. Choose the least access it needs.
       </p>
       <form
         onSubmit={(event) => void create(event)}

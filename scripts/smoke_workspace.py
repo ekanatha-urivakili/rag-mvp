@@ -36,6 +36,7 @@ async def seed() -> uuid.UUID:
             id=uuid.uuid4(),
             tenant_id=tenant,
             title="Smoke receipt",
+            kind="receipt",
             source_uri="smoke://fixture",
             mime_type="text/plain",
             size_bytes=1,
@@ -132,7 +133,7 @@ async def main() -> None:
             me = check(await viewer.get("/api/v1/me"), 200, "Viewer session").json()
             viewer_id = me["user_id"]
             html = check(await viewer.get("/"), 200, "Viewer navigation").text
-            assert 'href="/receipts"' in html and 'href="/members"' not in html and ('href="/settings"' not in html)
+            assert 'href="/receipts"' in html and 'href="/members"' not in html and 'href="/settings"' in html
             for path in ["/api/v1/members", "/api/v1/api-keys", "/api/v1/audit-log"]:
                 check(await viewer.get(path), 403, "Viewer denied " + path)
             detail = check(await viewer.get(f"/api/v1/receipts/{doc_id}"), 200, "Receipt detail").json()

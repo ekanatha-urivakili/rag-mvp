@@ -1,16 +1,14 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useCan } from "@/components/app-shell";
+import { FileUpload } from "@/components/file-upload";
 import { Alert, Button } from "@/components/ui";
-import { ApiError, getJson, request, sendJson } from "@/lib/client";
+import { ApiError, getJson, sendJson } from "@/lib/client";
 import { formatBytes } from "@/lib/format";
 import type { DocumentItem, Page } from "@/lib/types";
 
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-// UX hint only; the API sniffs the real type from content.
-const ACCEPT = ".pdf,.docx,.html,.htm,.md,.txt,.jpg,.jpeg,.png,.webp";
 const STEP: Record<string, string> = {
   reading: "Reading file",
   ocr: "Running OCR",
@@ -28,11 +26,6 @@ function progressText(d: DocumentItem): string {
 export function DocumentsView() {
   const canWrite = useCan("document:write");
   const canDelete = useCan("document:delete");
-  const qc = useQueryClient();
-  const [notes, setNotes] = useState<{ tone: "error" | "success"; text: string }[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
-
   const docs = useQuery({
     queryKey: ["documents"],
     queryFn: ({ signal }) => getJson<Page<DocumentItem>>("/api/v1/documents?limit=100", signal),
@@ -41,60 +34,13 @@ export function DocumentsView() {
       q.state.data?.items.some((d) => d.status === "queued" || d.status === "processing") ? 3000 : false,
   });
 
-  async function upload(files: FileList) {
-    setUploading(true);
-    const results: typeof notes = [];
-    for (const f of Array.from(files)) {
-      if (f.size > MAX_UPLOAD_BYTES) {
-        results.push({ tone: "error", text: `${f.name}: larger than 25 MB` });
-        continue;
-      }
-      const form = new FormData();
-      form.append("file", f, f.name);
-      try {
-        const r = await request("/api/v1/documents", { method: "POST", body: form });
-        const body = (await r.json()) as { status: string };
-        results.push({ tone: "success", text: `${f.name}: ${body.status}` });
-      } catch (e) {
-        results.push({ tone: "error", text: `${f.name}: ${e instanceof ApiError ? e.message : "upload failed"}` });
-      }
-    }
-    setNotes(results);
-    setUploading(false);
-    if (fileInput.current) fileInput.current.value = "";
-    await qc.invalidateQueries({ queryKey: ["documents"] });
-  }
-
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-xl font-semibold">Documents</h1>
-          {canWrite && (
-            <label className="cursor-pointer">
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                accept={ACCEPT}
-                className="sr-only"
-                disabled={uploading}
-                onChange={(e) => e.target.files?.length && void upload(e.target.files)}
-              />
-              <span className="inline-flex rounded-lg bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900">
-                {uploading ? "Uploading…" : "Upload documents"}
-              </span>
-            </label>
-          )}
         </div>
-        {canWrite && (
-          <p className="text-sm text-zinc-500">PDF, DOCX, HTML, Markdown, text, or receipt photos. Max 25 MB each.</p>
-        )}
-        {notes.map((n, i) => (
-          <Alert key={i} tone={n.tone}>
-            {n.text}
-          </Alert>
-        ))}
+        {canWrite && <FileUpload kind="document" />}
 
         {docs.isPending && <p className="text-sm text-zinc-500">Loading…</p>}
         {docs.isError && <Alert tone="error">Could not load documents.</Alert>}

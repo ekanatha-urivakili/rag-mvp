@@ -67,7 +67,7 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
         log.info("ingest_skipped_stale", extra=log_extra(document_id=str(doc_id)))
         return
     doc.status, doc.error, doc.progress = "processing", None, {"step": "reading"}
-    tenant_id, mime = doc.tenant_id, doc.mime_type
+    tenant_id, mime, kind = doc.tenant_id, doc.mime_type, doc.kind
     await db.commit()
 
     # Slow work (OCR, LLM extraction) runs without the index lock or the document row lock held.
@@ -81,7 +81,7 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
     if mime in IMAGES:
         await progress({"step": "ocr"})
     pages = await asyncio.to_thread(parse, raw, mime)
-    receipt = await _extract_receipt(raw, mime, pages, progress)
+    receipt = await _extract_receipt(raw, mime, pages, progress) if kind == "receipt" else None
     if receipt is not None:
         pages = [Page(number=1, markdown=to_markdown(receipt)), *pages]
     chunks = await asyncio.to_thread(chunk_pages, pages, s.chunk_tokens, s.chunk_overlap)
@@ -165,7 +165,11 @@ async def on_ingest_failed(db: AsyncSession, payload: dict[str, Any], error: str
             db,
             template="ingestion_failed",
             to=uploader.email,
-            context={"title": doc.title, "error": doc.error, "link": f"{get_settings().public_ui_url}/documents"},
+            context={
+                "title": doc.title,
+                "error": doc.error,
+                "link": f"{get_settings().public_ui_url}/{'receipts' if doc.kind == 'receipt' else 'documents'}",
+            },
         )
     await db.commit()
 

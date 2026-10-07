@@ -1,6 +1,6 @@
-# RAG MVP
+# FolioNest
 
-Multi-tenant document Q&A with receipt extraction. Users upload documents and receipt photos, then ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/rag_mvp_architecture.md`](docs/rag_mvp_architecture.md).
+Multi-tenant document Q&A with receipt extraction. Users upload documents and receipt photos, then ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```
 Browser ──same-origin──> Next.js BFF (encrypted session cookie, allowlisted proxy, CSP)
@@ -26,19 +26,20 @@ Worker: ingest (parse / OCR / receipt extraction: qwen3-vl → Claude → OpenAI
 - Model routing with fallbacks (`config/models.yaml`): local Ollama first for orchestration, Claude → OpenAI → local for generation. Runs fully local with no cloud keys.
 
 **Documents**
-- Upload PDF, DOCX, HTML, Markdown, plain text, and JPEG/PNG/WebP images (25 MB max). The type is detected from content, never from the client header.
+- Drag and drop PDF, DOCX, HTML, Markdown or plain text on Upload docs (25 MB max). The API detects the type from content, never from the client header. Image ingestion remains supported by the document API for existing clients; structured receipt extraction runs only for receipt uploads.
 - Scanned PDFs and images are OCR'd (RapidOCR, CPU).
 - Background ingestion with live progress, retries, versioning (re-uploading changed content creates version N+1), idempotent re-upload, and retry by re-uploading a failed file.
 - Deletion removes chunks, vectors and raw files asynchronously.
 
 **Receipts** ([details](#receipts))
-- Attach a receipt photo in chat, or upload it on the Documents page. A vision model extracts merchant, date and time, line items, discounts, subtotal, tax, tip, total, payment method, and card brand with the last 4 digits.
+- Upload PDF, JPEG, PNG or WebP on Scan receipts, with desktop drag and drop and mobile camera/gallery controls. A vision model extracts merchant, date and time, line items, discounts, subtotal, tax, tip, total, payment method, and card brand with the last 4 digits.
 - Arithmetic is cross-checked and mismatches are flagged, never "fixed". Full card numbers are masked.
-- A Receipts page lists receipts and shows details. Receipts are searchable from chat.
+- Receipt uploads have their own status list and never appear in the Documents library. Extracted receipts remain searchable from chat.
 
 **Accounts and workspaces**
 - Self-serve signup with email verification creates a private workspace where you are admin ([details](#signup)). Set `SIGNUP_ENABLED=false` for invitation-only use.
 - Email invitations into existing workspaces, password reset, and switching between workspaces.
+- Settings for every role: light/dark/device theme, editable profile name, verified email display, and current-password-verified password changes that revoke all sessions. Administrator API keys include help on hover/focus; dropdown arrows share aligned styling.
 - Roles: **viewer** (chat, read documents), **editor** (+ upload/delete documents), **admin** (+ members, API keys, audit log). Guards prevent removing or demoting the last admin.
 - API keys for programmatic access, scoped to a tenant and role.
 - An audit log of security-relevant events.
@@ -126,12 +127,12 @@ All routes are versioned under `/v1`. Each one requires a JWT (`Authorization: B
 
 | Area | Endpoints | Permission |
 | --- | --- | --- |
-| Auth | `POST /auth/signup`, `/auth/signup/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/switch-tenant`, `/auth/password/forgot`, `/auth/password/reset` | public, except logout/switch |
-| Profile | `GET /me` | any role |
+| Auth | `POST /auth/signup`, `/auth/signup/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/switch-tenant`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/password/change` | public, except logout/switch/change |
+| Profile | `GET /me`, `PATCH /me` (name) | any role; edits require a user session |
 | Chat | `POST /chat` (SSE: `status`, `model`, `token`, `answer`, `citations`, `done`; pass `conversation_id` to continue a chat), `POST /messages/{id}/feedback` | `chat:use` |
 | Chat history | `GET /conversations?limit&q&before&before_id` (most recent first, keyset paging, title search), `GET /conversations/{id}?limit&before`, `PATCH`/`DELETE /conversations/{id}` | `chat:use`, own only |
 | Documents | `POST /documents`, `GET /documents[/{id}]`, `DELETE /documents/{id}` | `document:read` / `write` / `delete` |
-| Receipts | `GET /receipts`, `GET /receipts/{document_id}` | `document:read` |
+| Receipts | `POST /receipts`, `GET /receipts`, `GET /receipts/{document_id}`; upload status via `GET /documents?kind=receipt` | `document:write` / `read` |
 | Members | `GET /members`, `PATCH`/`DELETE /members/{user_id}`, `POST`/`GET /invitations` | `member:manage` |
 | API keys | `GET`/`POST /api-keys`, `DELETE /api-keys/{id}` | `apikey:manage` |
 | Audit | `GET /audit-log` | `audit:read` |
@@ -184,7 +185,7 @@ running on the host; Compose applies migration `0002` automatically on API start
 
 ## Receipts
 
-Attach a receipt photo (JPEG, PNG, WebP) or PDF in **Chat**, or upload it on **Documents**. The worker:
+Upload a receipt photo (JPEG, PNG, WebP) or PDF in **Scan receipts**. The worker:
 
 1. OCRs images and text-less PDF pages with RapidOCR (PaddleOCR PP-OCR models on ONNX Runtime, CPU, bundled in the wheel).
 2. Sends the image plus the OCR text to the `receipt_extraction` route in `config/models.yaml`:
@@ -195,14 +196,14 @@ Attach a receipt photo (JPEG, PNG, WebP) or PDF in **Chat**, or upload it on **D
    never rewritten. Only the last 4 card digits are stored, and Luhn-valid full card numbers in OCR text are masked.
 4. Stores a `receipts` row and indexes a Markdown summary plus the OCR text, so chat can answer questions about it.
 
-`documents.progress` shows the live step and the model being tried; the chat and Documents page display it.
+`documents.progress` records the live processing step and model; Scan receipts shows upload status separately from Documents.
 `GET /v1/receipts` and `GET /v1/receipts/{document_id}` need `document:read`. Locally `qwen3-vl` takes about
 2–3 minutes per receipt on Apple silicon. If no model can answer, the OCR text is still indexed without structured fields.
 The container image installs `libgl1` and `libglib2.0-0t64`, which OpenCV needs.
 
 ## Web UI
 
-`web/` is a Next.js 16 app that serves the UI and acts as a backend-for-frontend (BFF). Design and full OWASP mapping: [architecture §6](docs/rag_mvp_architecture.md#6-ui-nextjs-bff).
+`web/` is a Next.js 16 app that serves the UI and acts as a backend-for-frontend (BFF). Design and full OWASP mapping: [architecture §6](docs/ARCHITECTURE.md#6-ui-nextjs-bff).
 
 - **API tokens are inaccessible to browser JavaScript.** Sign-in goes through `/api/auth/*`; the BFF keeps the access and refresh tokens in one AES-256-GCM encrypted, `HttpOnly`, `SameSite=Strict` cookie (`__Host-` + `Secure` over https). Refresh is single-flight within one process; multiple web replicas require session affinity or shared refresh coordination.
 - **Allowlisted proxy.** `/api/v1/*` forwards only listed method/path pairs with UUID-shaped IDs and streams JSON, multipart uploads and SSE. Actual bytes are capped at 16 KB for JSON and 30 MB for uploads. Queries over 2 KB return 414.
@@ -211,7 +212,9 @@ The container image installs `libgl1` and `libglib2.0-0t64`, which OpenCV needs.
 - **XSS:** per-request nonce CSP with `strict-dynamic`, no remote images, markdown rendered without raw HTML, and `dangerouslySetInnerHTML` banned by lint.
 - Env: `SESSION_SECRET` (generated by `start.sh`), `WEB_ORIGIN` (must be https in prod), `API_URL`, `TRUSTED_PROXY_HOPS`.
 
-After login, administrators see **Chat, Documents, Receipts, Members, and Settings**. Viewers and editors see Chat, Documents, and Receipts. Receipts lists extracted line items, totals, payment details, and review warnings; upload receipt images/PDFs on Documents. Members supports email invitations, pending invitations, role changes, and confirmed removal. Settings supports API key creation (secret displayed once), confirmed revocation, and paginated audit history. The API scopes data to the current workspace and enforces permissions on every request.
+FolioNest uses a teal/indigo/amber logo, a home hero and workspace footer links. Mobile bottom navigation shows **Home, Upload docs, Scan receipts, Members, Settings**, with Members restricted to managers. All roles can access personal settings; administrator API keys and audit history retain their permissions. Receipts upload directly on Scan receipts and stay in a separate library. Native camera/gallery inputs share only selected files; OS/browser controls permission prompts and gallery visibility. Camera capture depends on mobile browser support. HEIC is rejected with a format error; export it as JPEG/PNG/WebP first.
+
+Migration `0005` adds profile names and upload kinds, moves existing extracted receipts to the receipt library, and scopes file deduplication to each library. Take a backup before applying it with `.venv/bin/alembic upgrade head` (Compose runs upgrades on API startup). Downgrading is possible only when there are no duplicate file hashes across the two libraries; otherwise restore the pre-migration backup.
 
 Streamlit is now optional (`podman compose --profile legacy up -d ui`); the default launcher starts the Next.js workspace app.
 

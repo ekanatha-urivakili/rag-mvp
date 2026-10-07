@@ -3,6 +3,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Hero } from "@/components/brand";
 import { Markdown } from "@/components/markdown";
 import { Alert, Button } from "@/components/ui";
 import { ApiError, getJson, request, sendJson } from "@/lib/client";
@@ -213,8 +214,9 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
 function EmptyState() {
   return (
-    <div className="pt-[15vh] text-center">
-      <h1 className="text-2xl font-semibold">Ask your documents</h1>
+    <div className="space-y-6 pt-4 text-center sm:pt-[8vh]">
+      <Hero />
+      <h2 className="text-xl font-semibold">Ask your documents</h2>
       <p className="mt-2 text-sm text-zinc-500">
         Answers are grounded in your workspace&apos;s documents and cite their sources. Earlier chats are in the
         sidebar; open one to continue it.
