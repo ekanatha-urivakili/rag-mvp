@@ -23,6 +23,8 @@ MATRIX = [
     ("GET", f"/v1/receipts/{Z}", None, ALL),
     ("GET", "/v1/conversations", None, ALL),
     ("GET", f"/v1/conversations/{Z}", None, ALL),
+    ("PATCH", f"/v1/conversations/{Z}", {"title": "t"}, ALL),
+    ("DELETE", f"/v1/conversations/{Z}", None, ALL),
     ("POST", f"/v1/messages/{Z}/feedback", {"rating": 1}, ALL),
     ("GET", "/v1/members", None, {ADMIN}),
     ("PATCH", f"/v1/members/{Z}", {"role": "viewer"}, {ADMIN}),

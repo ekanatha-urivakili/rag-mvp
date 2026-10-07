@@ -228,6 +228,11 @@ class ConversationOut(Out):
     id: uuid.UUID
     title: str
     created_at: datetime
+    updated_at: datetime
+
+
+class ConversationPatchIn(In):
+    title: str = Field(min_length=1, max_length=200)
 
 
 class MessageOut(Out):
@@ -241,7 +246,8 @@ class MessageOut(Out):
 
 
 class ConversationDetailOut(ConversationOut):
-    messages: list[MessageOut]
+    messages: list[MessageOut]  # the most recent `limit` messages, oldest first
+    has_more: bool  # older messages exist; fetch them with ?before=<oldest created_at>
 
 
 class FeedbackIn(In):

@@ -247,7 +247,9 @@ class Conversation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = _created()
-    __table_args__ = (Index("ix_conversations_owner", "tenant_id", "user_id", "created_at"),)
+    # Last message activity; history is ordered and paginated by it.
+    updated_at: Mapped[datetime] = _created()
+    __table_args__ = (Index("ix_conversations_owner_activity", "tenant_id", "user_id", "updated_at", "id"),)
 
 
 class Message(Base):
@@ -267,6 +269,7 @@ class Message(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     debug: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = _created()
+    __table_args__ = (Index("ix_messages_conversation_created", "conversation_id", "created_at"),)
 
 
 class Feedback(Base):
