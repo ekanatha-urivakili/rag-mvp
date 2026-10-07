@@ -49,55 +49,70 @@ _CLAIM = text(
 )
 
 
-async def _finish(job_id: str, job_type: str) -> None:
-    async with get_sessionmaker()() as db:
-        # Email payloads hold single-use links; scrub them once delivered.
-        scrub = ", payload = jsonb_build_object('redacted', true)" if job_type == "send_email" else ""
-        await db.execute(text(f"UPDATE jobs SET status = 'done', error = NULL{scrub} WHERE id = :id"), {"id": job_id})  # noqa: S608
-        await db.commit()
+async def _finish(db: AsyncSession, job_id: str, job_type: str) -> None:
+    scrub = ", payload = jsonb_build_object('redacted', true)" if job_type == "send_email" else ""
+    await db.execute(text(f"UPDATE jobs SET status = 'done', error = NULL{scrub} WHERE id = :id"), {"id": job_id})  # noqa: S608
+    await db.commit()
 
 
-async def _fail(job_id: str, job_type: str, payload: dict[str, Any], attempts: int, err: BaseException) -> None:
-    max_attempts = get_settings().job_max_attempts
+async def _fail(
+    db: AsyncSession, job_id: str, job_type: str, payload: dict[str, Any], attempts: int, err: BaseException
+) -> None:
     message = redact(f"{type(err).__name__}: {err}")[:1000]
-    async with get_sessionmaker()() as db:
-        if attempts >= max_attempts:
-            await db.execute(
-                text("UPDATE jobs SET status = 'failed', error = :e WHERE id = :id"), {"id": job_id, "e": message}
-            )
-            await db.commit()
-            if hook := ON_FAILURE.get(job_type):
-                await hook(db, payload, message)
-        else:
-            delay = 10 * 2 ** (attempts - 1) + random.uniform(0, 5)  # noqa: S311
-            await db.execute(
-                text(
-                    "UPDATE jobs SET status = 'queued', error = :e, "
-                    "run_after = now() + make_interval(secs => :d) WHERE id = :id"
-                ),
-                {"id": job_id, "e": message, "d": delay},
-            )
-            await db.commit()
+    if attempts >= get_settings().job_max_attempts:
+        scrub = ", payload = jsonb_build_object('redacted', true)" if job_type == "send_email" else ""
+        await db.execute(
+            text(f"UPDATE jobs SET status = 'failed', error = :e{scrub} WHERE id = :id"),  # noqa: S608
+            {"id": job_id, "e": message},
+        )
+        if hook := ON_FAILURE.get(job_type):
+            async with get_sessionmaker()() as business_db:
+                await hook(business_db, payload, message)
+    else:
+        delay = 10 * 2 ** (attempts - 1) + random.uniform(0, 5)  # noqa: S311
+        await db.execute(
+            text(
+                "UPDATE jobs SET status = 'queued', error = :e, "
+                "run_after = now() + make_interval(secs => :d) WHERE id = :id"
+            ),
+            {"id": job_id, "e": message, "d": delay},
+        )
+    await db.commit()
 
 
 async def run_once() -> bool:
-    async with get_sessionmaker()() as db:
-        row = (await db.execute(_CLAIM)).one_or_none()
-        await db.commit()
-    if row is None:
-        return False
-    job_id, job_type, payload, attempts = str(row.id), row.type, row.payload, row.attempts
-    started = time.perf_counter()
-    try:
-        async with get_sessionmaker()() as db:
-            await HANDLERS[job_type](db, job_id, payload)
-        await _finish(job_id, job_type)
-        log.info(
-            "job_done", extra=log_extra(job_id=job_id, type=job_type, ms=int((time.perf_counter() - started) * 1000))
-        )
-    except Exception as e:
-        log.exception("job_failed", extra=log_extra(job_id=job_id, type=job_type, attempts=attempts))
-        await _fail(job_id, job_type, payload, attempts, e)
+    async with get_sessionmaker()() as lease_db:
+        row = (await lease_db.execute(_CLAIM)).one_or_none()
+        if row is None:
+            return False
+        job_id, job_type, payload, attempts = str(row.id), row.type, row.payload, row.attempts
+        started = time.perf_counter()
+        # Persist the claim while retaining a separate row lock during processing.
+        await lease_db.commit()
+        owned = (
+            await lease_db.execute(
+                text(
+                    "SELECT id FROM jobs WHERE id = :id AND status = 'running' AND attempts = :attempts "
+                    "FOR UPDATE SKIP LOCKED"
+                ),
+                {"id": job_id, "attempts": attempts},
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            return True
+        try:
+            if attempts > get_settings().job_max_attempts:
+                raise RuntimeError("Job exceeded the retry limit after worker interruption")
+            async with get_sessionmaker()() as db:
+                await HANDLERS[job_type](db, job_id, payload)
+            await _finish(lease_db, job_id, job_type)
+            log.info(
+                "job_done",
+                extra=log_extra(job_id=job_id, type=job_type, ms=int((time.perf_counter() - started) * 1000)),
+            )
+        except Exception as e:
+            log.exception("job_failed", extra=log_extra(job_id=job_id, type=job_type, attempts=attempts))
+            await _fail(lease_db, job_id, job_type, payload, attempts, e)
     return True
 
 

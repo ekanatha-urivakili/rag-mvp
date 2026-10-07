@@ -45,6 +45,8 @@ async def test_refresh_rotation_and_reuse_detection(client: httpx.AsyncClient, t
     # Replaying the rotated token revokes the whole family — including the fresh one.
     assert (await client.post("/v1/auth/refresh", json={"refresh_token": rt1})).status_code == 401
     assert (await client.post("/v1/auth/refresh", json={"refresh_token": rt2})).status_code == 401
+    for access in (r.json()["access_token"], r2.json()["access_token"]):
+        assert (await client.get("/v1/me", headers={"Authorization": f"Bearer {access}"})).status_code == 401
 
 
 async def test_security_headers(client: httpx.AsyncClient, tenant: Account) -> None:
@@ -144,3 +146,8 @@ async def test_api_key_auth(client: httpx.AsyncClient, tenant: Account) -> None:
     assert (await client.get("/v1/documents", headers={"X-API-Key": key})).status_code == 401
     actions = [e["action"] for e in (await client.get("/v1/audit-log", headers=tenant.headers)).json()]
     assert "apikey.created" in actions and "apikey.revoked" in actions
+
+
+async def test_logout_revokes_access_without_refresh_body(client: httpx.AsyncClient, tenant: Account) -> None:
+    assert (await client.post("/v1/auth/logout", json={}, headers=tenant.headers)).status_code == 204
+    assert (await client.get("/v1/me", headers=tenant.headers)).status_code == 401

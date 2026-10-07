@@ -37,7 +37,7 @@ class JsonFormatter(logging.Formatter):
             payload.update(extra)
         if record.exc_info:
             payload["exc"] = redact(self.formatException(record.exc_info))
-        return json.dumps(payload, default=str)
+        return redact(json.dumps(payload, default=str))
 
 
 def configure_logging(level: str) -> None:

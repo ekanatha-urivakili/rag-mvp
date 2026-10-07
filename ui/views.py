@@ -162,7 +162,7 @@ def chat() -> None:
         st.markdown(question)
     with st.chat_message("assistant"):
         status = st.empty()
-        result: dict[str, Any] = {"citations": [], "done": None, "debug": None}
+        result: dict[str, Any] = {"citations": [], "done": None, "debug": None, "answer": None}
 
         def tokens() -> Any:
             body = {"message": question, "conversation_id": conv_id}
@@ -171,6 +171,8 @@ def chat() -> None:
                     status.caption(f":material/progress_activity: {data['step']}…")
                 elif event == "token":
                     yield data["text"]
+                elif event == "answer":
+                    result["answer"] = data["text"]
                 elif event == "citations":
                     result["citations"] = data
                 elif event == "debug":
@@ -180,8 +182,12 @@ def chat() -> None:
                 elif event == "done":
                     result["done"] = data
 
+        answer = st.empty()
         try:
-            st.write_stream(tokens())
+            with answer.container():
+                streamed = st.write_stream(tokens())
+            if result["answer"] is not None and result["answer"] != streamed:
+                answer.markdown(result["answer"])
         except ApiError as e:
             _error(e)
         status.empty()
@@ -208,7 +214,7 @@ def _documents_table() -> None:
     df = pd.DataFrame(page["items"])[["title", "status", "version", "chunk_count", "size_bytes", "updated_at", "error"]]
     st.dataframe(df, hide_index=True, width="stretch")
     if can("document:delete"):
-        titles = {d["title"]: d["id"] for d in page["items"]}
+        titles = {f"{d['title']} · {d['id'][:8]}": d["id"] for d in page["items"]}
         with st.form("delete-doc"):
             target = st.selectbox("Delete a document", list(titles))
             if st.form_submit_button("Delete", type="secondary"):

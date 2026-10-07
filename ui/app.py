@@ -1,6 +1,6 @@
 import streamlit as st
 import views
-from api import can, me
+from api import ApiError, can, me
 
 st.set_page_config(page_title="RAG Assistant", page_icon=":material/forum:", layout="wide")
 
@@ -9,7 +9,11 @@ if token := st.query_params.get("token"):
     st.session_state["link_token"] = token
     st.query_params.clear()
 
-info = me()
+try:
+    info = me()
+except ApiError as exc:
+    st.error(exc.message)
+    st.stop()
 public = [
     st.Page(views.reset_password, title="Reset password", url_path="reset_password", icon=":material/key:"),
     st.Page(views.accept_invite, title="Accept invite", url_path="accept_invite", icon=":material/mail:"),

@@ -15,6 +15,7 @@ ALL = {ADMIN, EDITOR, VIEWER}
 # (method, path, json, allowed roles). "Allowed" = anything except 401/403.
 MATRIX = [
     ("GET", "/v1/me", None, ALL),
+    ("POST", "/v1/chat", {"message": "test", "conversation_id": str(Z)}, ALL),
     ("GET", "/v1/documents", None, ALL),
     ("GET", f"/v1/documents/{Z}", None, ALL),
     ("DELETE", f"/v1/documents/{Z}", None, {ADMIN, EDITOR}),
@@ -30,6 +31,7 @@ MATRIX = [
     ("POST", "/v1/api-keys", {"name": "k", "role": "viewer"}, {ADMIN}),
     ("DELETE", f"/v1/api-keys/{Z}", None, {ADMIN}),
     ("GET", "/v1/audit-log", None, {ADMIN}),
+    ("POST", "/v1/auth/logout", {}, ALL),
 ]
 
 
@@ -39,6 +41,7 @@ async def test_matrix(client: httpx.AsyncClient, tenant: Account, role: Role) ->
     failures = []
     for method, path, body, allowed in MATRIX:
         r = await client.request(method, path, json=body, headers=actor.headers)
+        assert r.status_code < 500, f"{role} {method} {path}: {r.text}"
         denied = r.status_code in (401, 403)
         if denied == (role in allowed):
             failures.append(f"{role} {method} {path} -> {r.status_code}")

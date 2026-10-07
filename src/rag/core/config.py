@@ -113,6 +113,14 @@ class Settings(BaseSettings):
         if self.env == "prod":
             if any(o == "*" for o in self.cors_origins):
                 raise ValueError("CORS wildcard is not allowed in prod")
+            if "*" in self.allowed_hosts:
+                raise ValueError("ALLOWED_HOSTS wildcard is not allowed in prod")
+            if any(not o.startswith("https://") for o in self.cors_origins):
+                raise ValueError("CORS origins must be https in prod")
+            if not self.qdrant_api_key or not self.qdrant_api_key.get_secret_value().strip():
+                raise ValueError("QDRANT_API_KEY is required in prod")
+            if self.s3_secret_key.get_secret_value().lower() in {"", "minioadmin", *_WEAK_SECRETS}:
+                raise ValueError("S3_SECRET_KEY must be configured in prod")
             if not self.public_ui_url.startswith("https://"):
                 raise ValueError("PUBLIC_UI_URL must be https in prod")
         return self

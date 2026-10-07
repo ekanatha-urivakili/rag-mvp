@@ -13,6 +13,7 @@ class RequestContext(BaseModel):
     tenant_id: uuid.UUID
     role: Role
     api_key_id: uuid.UUID | None = None
+    session_id: uuid.UUID | None = None
     ip: str | None = None
 
     def can(self, permission: Permission) -> bool:

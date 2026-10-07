@@ -15,6 +15,7 @@ def _claims(**over: object) -> dict[str, object]:
     base: dict[str, object] = {
         "sub": str(uuid.uuid4()),
         "tid": str(uuid.uuid4()),
+        "sid": str(uuid.uuid4()),
         "iss": s.jwt_issuer,
         "aud": s.jwt_audience,
         "iat": now,
@@ -32,7 +33,7 @@ def _sign(claims: dict[str, object], key: str | None = None, alg: str = "HS256")
 
 def test_roundtrip() -> None:
     uid, tid = uuid.uuid4(), uuid.uuid4()
-    token, ttl = create_access_token(uid, tid)
+    token, ttl = create_access_token(uid, tid, uuid.uuid4())
     claims = decode_access_token(token)
     assert claims["sub"] == str(uid) and claims["tid"] == str(tid) and ttl == 900
 
@@ -56,7 +57,7 @@ def test_rejects_bad_tokens(token_factory) -> None:  # type: ignore[no-untyped-d
 
 
 def test_tampered_payload_rejected() -> None:
-    token, _ = create_access_token(uuid.uuid4(), uuid.uuid4())
+    token, _ = create_access_token(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
     header, payload, sig = token.split(".")
     with pytest.raises(Unauthorized):
         decode_access_token(f"{header}.{payload[:-2]}AA.{sig}")

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -46,7 +47,7 @@ async def _issue_tokens(
         expires_at=_now() + timedelta(seconds=get_settings().refresh_token_ttl_s),
     )
     db.add(rt)
-    access, ttl = create_access_token(user_id, tenant_id)
+    access, ttl = create_access_token(user_id, tenant_id, rt.family_id)
     return TokenPair(access, raw, ttl, tenant_id), rt
 
 
@@ -68,8 +69,8 @@ async def login(
     await ratelimit.hit(db, f"login:ip:{ip}", s.rl_login_per_ip, s.rl_login_window_s)
     await ratelimit.hit(db, f"login:email:{email}", s.rl_login_per_email, s.rl_login_window_s)
 
-    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    ok, upgraded_hash = verify_password(password, user.password_hash if user else None)
+    user = (await db.execute(select(User).where(User.email == email).with_for_update())).scalar_one_or_none()
+    ok, upgraded_hash = await asyncio.to_thread(verify_password, password, user.password_hash if user else None)
     if user is None or not ok or not user.is_active:
         audit(db, action="auth.login_failed", tenant_id=None, actor_user_id=user.id if user else None, ip=ip)
         await db.commit()
@@ -85,6 +86,12 @@ async def login(
 
 
 async def refresh(db: AsyncSession, raw: str) -> TokenPair:
+    user_id = (
+        await db.execute(select(RefreshToken.user_id).where(RefreshToken.token_hash == hash_token(raw)))
+    ).scalar_one_or_none()
+    if user_id is None:
+        raise Unauthorized("Invalid refresh token")
+    await db.execute(select(User.id).where(User.id == user_id).with_for_update())
     rt = (
         await db.execute(select(RefreshToken).where(RefreshToken.token_hash == hash_token(raw)).with_for_update())
     ).scalar_one_or_none()
@@ -135,6 +142,8 @@ async def _revoke_all_for_user(db: AsyncSession, user_id: uuid.UUID) -> None:
 
 
 async def logout(db: AsyncSession, ctx: RequestContext, raw: str | None) -> None:
+    if ctx.session_id is not None:
+        await _revoke_family(db, ctx.session_id)
     if raw:
         rt = (
             await db.execute(select(RefreshToken).where(RefreshToken.token_hash == hash_token(raw)))
@@ -165,7 +174,7 @@ async def forgot_password(db: AsyncSession, *, email: str, ip: str | None) -> No
     email = normalize_email(email)
     await ratelimit.hit(db, f"forgot:ip:{ip}", s.rl_forgot_per_ip, s.rl_forgot_window_s)
     await ratelimit.hit(db, f"forgot:email:{email}", 3, s.rl_forgot_window_s)
-    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    user = (await db.execute(select(User).where(User.email == email).with_for_update())).scalar_one_or_none()
     if user is None or not user.is_active:
         return
     raw = new_opaque_token()
@@ -204,14 +213,29 @@ async def _consume_email_token(db: AsyncSession, raw: str, token_type: str) -> E
 
 
 async def reset_password(db: AsyncSession, *, token: str, new_password: str, ip: str | None) -> None:
-    tok = await _consume_email_token(db, token, "password_reset")
-    user = (await db.execute(select(User).where(User.email == tok.email))).scalar_one_or_none()
+    await ratelimit.hit(db, f"reset:ip:{ip}", 20, 3600)
+    email = (
+        await db.execute(
+            select(EmailToken.email).where(
+                EmailToken.token_hash == hash_token(token), EmailToken.type == "password_reset"
+            )
+        )
+    ).scalar_one_or_none()
+    if email is None:
+        raise AppError("This link is invalid or has expired", code="invalid_token")
+    user = (await db.execute(select(User).where(User.email == email).with_for_update())).scalar_one_or_none()
+    await _consume_email_token(db, token, "password_reset")
     if user is None:
         raise AppError("This link is invalid or has expired", code="invalid_token")
     validate_password_policy(new_password, user.email)
-    user.password_hash = hash_password(new_password)
+    user.password_hash = await asyncio.to_thread(hash_password, new_password)
     user.tokens_valid_after = _now()
     await _revoke_all_for_user(db, user.id)
+    await db.execute(
+        update(EmailToken)
+        .where(EmailToken.email == user.email, EmailToken.type == "password_reset", EmailToken.used_at.is_(None))
+        .values(used_at=_now())
+    )
     audit(db, action="auth.password_reset", tenant_id=None, actor_user_id=user.id, ip=ip)
     await db.commit()
 
@@ -273,14 +297,15 @@ async def invite(db: AsyncSession, ctx: RequestContext, *, email: str, role: Rol
 
 
 async def accept_invite(db: AsyncSession, *, token: str, password: str | None, ip: str | None) -> TokenPair:
+    await ratelimit.hit(db, f"accept:ip:{ip}", 20, 3600)
     tok = await _consume_email_token(db, token, "invite")
     assert tok.tenant_id is not None and tok.role is not None
-    user = (await db.execute(select(User).where(User.email == tok.email))).scalar_one_or_none()
+    user = (await db.execute(select(User).where(User.email == tok.email).with_for_update())).scalar_one_or_none()
     if user is None:
         if not password:
             raise AppError("A password is required to create your account", code="password_required")
         validate_password_policy(password, tok.email)
-        user = User(id=uuid.uuid4(), email=tok.email, password_hash=hash_password(password))
+        user = User(id=uuid.uuid4(), email=tok.email, password_hash=await asyncio.to_thread(hash_password, password))
         db.add(user)
         await db.flush()
     elif not user.is_active:
@@ -317,6 +342,10 @@ async def _admin_count(db: AsyncSession, tenant_id: uuid.UUID) -> int:
 
 
 async def _get_member(db: AsyncSession, ctx: RequestContext, user_id: uuid.UUID) -> Membership:
+    await db.execute(select(Tenant.id).where(Tenant.id == ctx.tenant_id).with_for_update())
+    actor = await db.get(Membership, (ctx.user_id, ctx.tenant_id), populate_existing=True)
+    if actor is None or actor.role != Role.ADMIN.value:
+        raise Forbidden()
     m = (
         await db.execute(
             select(Membership)
@@ -389,9 +418,9 @@ async def bootstrap_admin(db: AsyncSession, *, email: str, password: str, tenant
     if tenant is None:
         tenant = Tenant(id=uuid.uuid4(), name=tenant_name)
         db.add(tenant)
-    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    user = (await db.execute(select(User).where(User.email == email).with_for_update())).scalar_one_or_none()
     if user is None:
-        user = User(id=uuid.uuid4(), email=email, password_hash=hash_password(password))
+        user = User(id=uuid.uuid4(), email=email, password_hash=await asyncio.to_thread(hash_password, password))
         db.add(user)
     await db.flush()
     if await db.get(Membership, (user.id, tenant.id)) is None:

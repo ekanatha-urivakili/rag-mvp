@@ -49,7 +49,7 @@ def sniff_mime(data: bytes, filename: str) -> str:
     if b"\x00" in data[:8192]:
         raise UnsupportedMediaType("Unsupported binary file type")
     try:
-        head = data[:4096].decode("utf-8").lstrip("﻿").lstrip().lower()
+        head = data.decode("utf-8")[:4096].lstrip("﻿").lstrip().lower()
     except UnicodeDecodeError as e:
         raise UnsupportedMediaType("Text files must be UTF-8") from e
     ext = PurePosixPath(filename.lower()).suffix

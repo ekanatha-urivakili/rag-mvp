@@ -26,12 +26,13 @@ def tokens_equal(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
 
 
-def create_access_token(user_id: uuid.UUID, tenant_id: uuid.UUID) -> tuple[str, int]:
+def create_access_token(user_id: uuid.UUID, tenant_id: uuid.UUID, family_id: uuid.UUID) -> tuple[str, int]:
     s = get_settings()
     now = datetime.now(UTC).timestamp()  # sub-second iat so revocation by timestamp is exact
     claims: dict[str, Any] = {
         "sub": str(user_id),
         "tid": str(tenant_id),
+        "sid": str(family_id),
         "iss": s.jwt_issuer,
         "aud": s.jwt_audience,
         "iat": now,
@@ -54,7 +55,7 @@ def decode_access_token(token: str) -> dict[str, Any]:
             algorithms=[_ALGORITHM],
             audience=s.jwt_audience,
             issuer=s.jwt_issuer,
-            options={"require": ["exp", "iat", "nbf", "sub", "tid", "iss", "aud", "jti"]},
+            options={"require": ["exp", "iat", "nbf", "sub", "tid", "sid", "iss", "aud", "jti"]},
             leeway=10,
         )
     except jwt.PyJWTError as e:
@@ -64,6 +65,7 @@ def decode_access_token(token: str) -> dict[str, Any]:
     try:
         uuid.UUID(claims["sub"])
         uuid.UUID(claims["tid"])
+        uuid.UUID(claims["sid"])
     except (ValueError, TypeError) as e:
         raise Unauthorized("Invalid token subject") from e
     return claims

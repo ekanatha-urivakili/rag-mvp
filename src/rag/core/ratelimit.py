@@ -1,3 +1,4 @@
+import hashlib
 import time
 from datetime import UTC, datetime
 
@@ -17,6 +18,8 @@ _SQL = text(
 
 
 async def hit(db: AsyncSession, key: str, limit: int, window_s: int) -> None:
+    if len(key) > 200:
+        key = hashlib.sha256(key.encode()).hexdigest()
     now = int(time.time())
     start = now - now % window_s
     count = (await db.execute(_SQL, {"key": key[:200], "ws": datetime.fromtimestamp(start, UTC)})).scalar_one()

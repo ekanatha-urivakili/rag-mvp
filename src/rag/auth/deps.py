@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rag.auth.rbac import Permission, Role
 from rag.auth.tokens import decode_access_token, hash_token, parse_api_key_prefix, tokens_equal
 from rag.core.errors import Forbidden, Unauthorized
-from rag.db.models import ApiKey, Membership, User
+from rag.db.models import ApiKey, Membership, RefreshToken, User
 from rag.db.session import get_db
 from rag.domain.models import RequestContext
 
@@ -53,7 +53,23 @@ async def _context_from_jwt(db: AsyncSession, token: str, ip: str | None) -> Req
     issued_at = datetime.fromtimestamp(claims["iat"], UTC)
     if issued_at < row.tokens_valid_after:
         raise Unauthorized("Token revoked")
-    return RequestContext(user_id=user_id, tenant_id=tenant_id, role=Role(row.role), ip=ip)
+    session_id = uuid.UUID(claims["sid"])
+    live = (
+        await db.execute(
+            select(RefreshToken.id)
+            .where(
+                RefreshToken.family_id == session_id,
+                RefreshToken.user_id == user_id,
+                RefreshToken.tenant_id == tenant_id,
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at > datetime.now(UTC),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if live is None:
+        raise Unauthorized("Session revoked")
+    return RequestContext(user_id=user_id, tenant_id=tenant_id, role=Role(row.role), session_id=session_id, ip=ip)
 
 
 async def get_context(

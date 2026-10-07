@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.body_limit import RequestBodyLimitMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rag.api.middleware import SecurityMiddleware
@@ -26,9 +27,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     await get_vectorstore().ensure_collection()
     await get_storage().ensure_bucket()
-    warmup = asyncio.create_task(_warm_local_models())
+    await _warm_local_models()
     yield
-    warmup.cancel()
 
 
 async def _warm_local_models() -> None:
@@ -36,7 +36,7 @@ async def _warm_local_models() -> None:
     from rag.adapters.llm.router import get_router
 
     try:
-        await get_router().warm_local_models()
+        await asyncio.wait_for(get_router().warm_local_models(), timeout=120)
     except Exception:
         log.warning("model_warmup_failed", exc_info=True)
 
@@ -107,6 +107,7 @@ def create_app() -> FastAPI:
     ):
         app.include_router(r)
 
+    app.add_middleware(RequestBodyLimitMiddleware, max_body_size=s.max_request_body_bytes)
     app.add_middleware(SecurityMiddleware)
     app.add_middleware(
         CORSMiddleware,

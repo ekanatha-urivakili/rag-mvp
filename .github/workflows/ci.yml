@@ -52,6 +52,7 @@ jobs:
       - run: uv run mypy src
       - run: uv run pytest -q
       - name: Dependency vulnerability audit (OWASP A06)
+        shell: bash
         run: uvx --python 3.12 pip-audit --strict --disable-pip --no-deps -r <(uv export --no-dev --no-hashes --frozen --no-emit-project)
 
   # Retrieval/generation regression gate. Needs a seeded eval tenant + provider keys as secrets.
