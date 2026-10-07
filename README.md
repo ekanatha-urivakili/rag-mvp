@@ -52,6 +52,34 @@ The default UI is Next.js; Streamlit is available through the optional `legacy` 
 - CI checks for Python and web lint, formatting, types, tests, web builds, and dependency audits; optional retrieval/faithfulness evaluation gate.
 - OWASP Web/API Top 10 controls ([mapping](#owasp-coverage)), including escaped document context and static parameterized worker updates.
 
+## Technology stack and rationale
+
+These are the technologies used by the implementation. Versions come from `pyproject.toml`, `uv.lock`, `web/package.json`, and `compose.yaml`; model routes come from `config/models.yaml`.
+
+| Area | Technology used | Why this choice fits the project |
+| --- | --- | --- |
+| Backend language | Python 3.12 | Keeps document parsing, OCR, model SDKs, and the API in the same language, with type checking for application code. |
+| API and validation | FastAPI, Uvicorn, Pydantic v2 | Async request handling supports model/storage calls and SSE streaming; explicit schemas validate requests and structured model output. SSE delivers answers over ordinary HTTP. |
+| RAG orchestration | LangGraph | Makes query analysis, retrieval, grading, the single rewrite, and citation validation explicit graph steps. Conversation history is loaded from Postgres; no graph checkpointer is used. |
+| Model adapters | Ollama, Anthropic, and OpenAI SDKs behind an `LLM` protocol | Purpose-based routes and fallbacks let orchestration and receipt extraction start locally while generation can use cloud models. The adapters keep provider-specific request formats outside graph logic. |
+| Default model routes | Ollama `qwen3.5:4b` for orchestration; Claude Sonnet 5.5 → OpenAI → Ollama for generation; Ollama `qwen3-vl` → Claude → OpenAI for receipts | Local routes permit document chat and receipt processing without cloud keys. Cloud fallbacks are available when configured; latency and output quality depend on the selected model and hardware. |
+| Dense embeddings | Ollama `bge-m3` (default, 1024 dimensions), or OpenAI embeddings | The local default avoids a cloud dependency for indexing. Embedding settings are configurable; changing the model or dimensions requires reindexing and coordinated rollout. |
+| Keyword retrieval and reranking | `fastembed` BM25 and `BAAI/bge-reranker-base` on ONNX/CPU | BM25 adds exact-term matching to semantic retrieval. A cross-encoder reranks candidates without a PyTorch runtime; failures fall back to the available retrieval results. |
+| Search index | Qdrant | Supports dense/sparse hybrid search, RRF fusion, tenant payload filters, and collection aliases for index replacement. It holds derived search state while Postgres determines document visibility. |
+| Relational persistence | PostgreSQL 16, SQLAlchemy 2 async, `asyncpg`, Alembic | Transactions keep business changes and jobs together; relational constraints support identity, memberships, documents, receipts, and chat. Alembic versions schema changes. |
+| Background jobs and rate limits | PostgreSQL `jobs` and `rate_limits` tables; async Python worker | Row locks and `SKIP LOCKED` support concurrent workers and retries. Shared database counters work across API replicas without an additional queue or cache service in the MVP. |
+| Raw file storage | S3 API through `boto3`; RustFS locally | Keeps large raw files outside relational rows, with tenant/document/version object keys. The storage adapter allows a configured S3-compatible endpoint. |
+| Parsing, OCR, and chunking | PyMuPDF4LLM, `python-docx`, `trafilatura`, Pillow, RapidOCR, `tiktoken` | Format-specific parsers recover document text; CPU OCR handles scans and photos. Token-aware chunks retain heading/page context and bound embedding input sizes. |
+| Authentication | `pwdlib`/Argon2id, PyJWT, hashed refresh tokens and API keys | Password hashing, short-lived access tokens, rotating refresh-token families, and revocable tenant-scoped keys implement the account and session requirements. |
+| Web application | Node.js 22+, Next.js 16 App Router, React 19, TypeScript | The same app serves workspace pages and a server-side BFF that holds API tokens in an encrypted HttpOnly cookie. TypeScript checks UI and API contracts. |
+| UI styling and data | Tailwind CSS 4, TanStack Query, `react-markdown` | Utility styles support responsive themes; query caching and invalidation keep workspace lists current; Markdown displays answers without enabling raw HTML. |
+| BFF validation and sessions | Zod and `jose` | Zod validates server configuration; `jose` provides authenticated encryption for session cookies. Origin checks and an allowlisted proxy constrain browser requests. |
+| Transactional email | `aiosmtplib`, Jinja2; Mailpit locally | SMTP works through configured mail infrastructure; HTML templates autoescape values. Email jobs commit with business changes, and Mailpit captures local verification/invitation/reset messages. |
+| Optional legacy UI | Streamlit | Retains a Python-based interface for existing workflows; the default workspace UI is Next.js. |
+| Containers and local infrastructure | Podman + Compose, OCI Containerfiles | Reproduces the API, worker, web app, database, search, storage, and email services locally, with persistent volumes and constrained application containers. |
+| Quality and delivery checks | `uv`, Ruff, strict mypy, pytest; ESLint, Prettier, TypeScript, Vitest; GitHub Actions and dependency audits | Lockfiles make dependency resolution reproducible. CI checks types, formatting, behavior, builds, and dependencies, including integration tests with provisioned services. |
+| Observability and evaluation | Structured JSON logs, request/trace IDs, stored model usage; retrieval metrics and an LLM faithfulness judge | Provides operational and answer-quality evidence with the current stack. OpenTelemetry, Langfuse, and RAGAS are not implemented. |
+
 ## High-level design (HLD)
 
 ```mermaid
@@ -62,7 +90,7 @@ flowchart TB
     subgraph application["Application services"]
         web["Next.js UI + BFF<br/>Encrypted HttpOnly session, Origin checks, allowlisted proxy"]
         api["FastAPI /v1<br/>JWT / API keys, RBAC, tenant and owner checks, rate limits"]
-        graph["LangGraph corrective RAG<br/>Analyze, retrieve, grade, rewrite once, generate, validate citations"]
+        ragGraph["LangGraph corrective RAG<br/>Analyze, retrieve, grade, rewrite once, generate, validate citations"]
         retrieval["Retrieval<br/>Dense + BM25, RRF, Postgres version check, rerank"]
         worker["Async worker<br/>Ingest, send email, reindex, purge"]
         ingest["Ingestion<br/>Parse / OCR, receipt extraction, heading-aware chunks, batch embeddings"]
@@ -84,9 +112,9 @@ flowchart TB
     legacy -->|"User JWT"| api
     api --> pg
     api -->|"Store raw uploads"| storage
-    api --> graph
-    graph --> retrieval
-    graph --> llm
+    api --> ragGraph
+    ragGraph --> retrieval
+    ragGraph --> llm
     retrieval --> embed
     retrieval --> local
     retrieval --> vectors
