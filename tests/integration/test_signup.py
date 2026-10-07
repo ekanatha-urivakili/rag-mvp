@@ -56,6 +56,13 @@ async def test_existing_signup_is_generic_and_does_not_replace_user(client: http
     assert known.status_code == unknown.status_code == 202 and known.json() == unknown.json()
     async with get_sessionmaker()() as db:
         assert (await db.execute(select(func.count()).select_from(Tenant))).scalar_one() == 1
+        assert (await db.execute(select(EmailToken).where(EmailToken.email == tenant.email))).first() is None
+    while await run_once():
+        pass
+    [message] = await mailpit_messages(tenant.email)
+    assert message["Subject"] == "You already have a RAG account"
+    body = await mailpit_body(str(message["ID"]))
+    assert f"{get_settings().public_ui_url}/login" in body and "token=" not in body
     assert (await client.post("/v1/auth/login", json={"email": tenant.email, "password": PASSWORD})).status_code == 200
 
 
