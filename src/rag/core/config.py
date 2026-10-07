@@ -43,17 +43,22 @@ class Settings(BaseSettings):
     rl_login_window_s: int = 900
     rl_forgot_per_ip: int = 5
     rl_forgot_window_s: int = 3600
+    rl_refresh_per_ip: int = Field(default=120, gt=0)
+    rl_refresh_window_s: int = Field(default=60, gt=0)
     rl_chat_per_tenant: int = 120
     rl_chat_per_user: int = 30
     rl_chat_window_s: int = 60
     rl_upload_per_tenant: int = 60
     rl_upload_window_s: int = 3600
+    rl_invite_per_tenant: int = Field(default=20, gt=0)
+    rl_invite_window_s: int = Field(default=3600, gt=0)
 
     # --- Uploads ---
     max_upload_bytes: int = 25 * 1024 * 1024
     max_docx_uncompressed_bytes: int = 200 * 1024 * 1024
     max_image_pixels: int = 40_000_000  # decompression-bomb guard for uploaded images
     max_ocr_pages: int = 20
+    max_pdf_pages: int = Field(default=200, gt=0)
 
     # --- Storage ---
     s3_endpoint_url: str = "http://localhost:9000"

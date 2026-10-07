@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BodyTooLarge, clientIp, isSameOrigin, readJsonBounded, resolveProxyTarget } from "@/lib/security";
+import { BodyTooLarge, boundedBody, clientIp, isSameOrigin, readJsonBounded, resolveProxyTarget } from "@/lib/security";
 
 const ID = "3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b";
 
@@ -49,6 +49,9 @@ describe("isSameOrigin (CSRF)", () => {
 });
 
 describe("clientIp", () => {
+  it("ignores client-supplied identity without a trusted ingress", () => {
+    expect(clientIp(new Headers({ "x-forwarded-for": "203.0.113.7" }), 0)).toBeNull();
+  });
   it("takes the entry appended by the trusted hop, ignoring client-supplied prefixes", () => {
     const h = new Headers({ "x-forwarded-for": "6.6.6.6, 203.0.113.7" });
     expect(clientIp(h, 1)).toBe("203.0.113.7");
@@ -57,6 +60,34 @@ describe("clientIp", () => {
   it("rejects garbage", () => {
     expect(clientIp(new Headers({ "x-forwarded-for": "<script>" }), 1)).toBeNull();
     expect(clientIp(new Headers(), 1)).toBeNull();
+    expect(clientIp(new Headers({ "x-forwarded-for": "999.999.999.999" }), 1)).toBeNull();
+    expect(clientIp(new Headers({ "x-forwarded-for": "::::" }), 1)).toBeNull();
+  });
+});
+
+describe("boundedBody", () => {
+  it("streams under the cap without buffering the complete upload", async () => {
+    const input = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("small"));
+        c.close();
+      },
+    });
+    const body = boundedBody(input, 10);
+    expect(await new Response(body.stream).text()).toBe("small");
+    expect(body.exceeded()).toBe(false);
+  });
+  it("aborts when accumulated chunked bytes exceed the cap", async () => {
+    const input = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array(6));
+        c.enqueue(new Uint8Array(6));
+        c.close();
+      },
+    });
+    const body = boundedBody(input, 10);
+    await expect(new Response(body.stream).arrayBuffer()).rejects.toBeInstanceOf(BodyTooLarge);
+    expect(body.exceeded()).toBe(true);
   });
 });
 

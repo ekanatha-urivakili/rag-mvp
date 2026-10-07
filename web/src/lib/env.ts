@@ -11,8 +11,8 @@ const schema = z
     // Encrypts the session cookie (A256GCM). Rotate to log everyone out.
     SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 characters"),
     // Number of trusted reverse proxies in front of this app that append to X-Forwarded-For.
-    // Next.js itself sets X-Forwarded-For to the socket peer when absent, so 1 = "no ingress".
-    TRUSTED_PROXY_HOPS: z.coerce.number().int().min(1).max(5).default(1),
+    // 0 ignores forwarded identity. Enable only behind an ingress that overwrites/appends the peer IP.
+    TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
     ENV: z.enum(["dev", "test", "prod"]).default("dev"),
   })
   .refine((e) => e.ENV !== "prod" || e.APP_ORIGIN.startsWith("https://"), {

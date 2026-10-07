@@ -158,7 +158,7 @@ async def on_ingest_failed(db: AsyncSession, payload: dict[str, Any], error: str
     ).scalar_one_or_none()
     if doc is None or doc.version != int(payload["version"]) or doc.status == "deleted":
         return
-    doc.status, doc.error, doc.progress = "failed", error[:500], None
+    doc.status, doc.error, doc.progress = "failed", "Document processing failed. Retry or contact support.", None
     uploader = await db.get(User, doc.uploaded_by) if doc.uploaded_by else None
     if uploader is not None:
         queue_email(

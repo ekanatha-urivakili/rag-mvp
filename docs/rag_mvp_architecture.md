@@ -2,6 +2,8 @@
 
 ## 0. Review Notes
 
+Current implementation/security evidence: [principal review, 7 October 2026](PRINCIPAL_CODE_REVIEW.md). Performance targets below remain targets; the conditional eval CI job requires configured infrastructure and credentials.
+
 ### Revision 2 — architecture review
 
 | # | Before | Now | Why |
@@ -36,9 +38,9 @@
 
 ## 1. Scope
 
-**Goal:** Invited users of a tenant upload documents and ask questions in a chat UI; answers are grounded in those documents, streamed, and cite sources. When the documents don't contain the answer, the system says so. Access is controlled by role.
+**Goal:** Email-verified signup creates a private workspace; invited users join an existing workspace. Users upload documents and ask questions in a chat UI; answers are grounded in those documents, streamed, and cite sources. When the documents don't contain the answer, the system says so. Access is controlled by role.
 
-**MVP non-goals** (explicitly deferred): fine-tuning, GraphRAG, web search tools, OCR/scanned images (later: local `qwen3-vl` via Ollama), per-document ACLs (tenant-level roles only), custom roles, SSO/OIDC, agents with side-effecting tools, multi-region.
+**MVP non-goals** (explicitly deferred): fine-tuning, GraphRAG, web search tools, per-document ACLs (tenant-level roles only), custom roles, SSO/OIDC, agents with side-effecting tools, multi-region. OCR of images/scanned PDFs and structured receipt extraction are implemented.
 
 ### Targets (MVP)
 
@@ -610,7 +612,7 @@ History sidebar: "New chat", debounced title search, groups (Today / Yesterday /
 
 ### 6.2 Session and token handling
 
-- **Login** (`POST /api/auth/login`): the BFF calls `/v1/auth/login`, then stores `{access, refresh, access_exp}` in one cookie encrypted with **JWE `dir` + A256GCM** (key = SHA-256 of `SESSION_SECRET`). Response body is `{ok: true}` — the browser never receives a token, so XSS cannot exfiltrate one.
+- **Login** (`POST /api/auth/login`): the BFF calls `/v1/auth/login`, then stores `{access, refresh, access_exp}` in one cookie encrypted with **JWE `dir` + A256GCM** (key = SHA-256 of `SESSION_SECRET`). Response body is `{ok: true}`. Browser JavaScript cannot read the tokens; XSS could still perform actions using the session.
 - **Cookie**: `HttpOnly`, `SameSite=Strict`, `Path=/`, 14-day max-age; `Secure` + `__Host-` prefix whenever `WEB_ORIGIN` is https (prod requires it).
 - **Refresh**: `proxy.ts` refreshes when the access token has < 60 s left, rewrites the cookie on both the forwarded request and the response, so server components and route handlers see the new token. Refresh tokens rotate and **reuse revokes the whole family** (§4.7), so concurrent requests holding the same expiring cookie share one in-flight refresh, and the result is reused for 60 s. That cache is per process: run web replicas with **sticky sessions** (or move the cache to Redis) before scaling out. API unreachable ≠ invalid: only a 401 from `/v1/auth/refresh` clears the cookie.
 - **Logout / workspace switch**: revoke the refresh family at the API, then clear/replace the cookie. Switching workspace revokes the old workspace's session.
@@ -630,7 +632,7 @@ History sidebar: "New chat", debounced title search, groups (Today / Yesterday /
 | **A08** Integrity | Lockfile installs (`npm ci --ignore-scripts` in the image); no third-party scripts or CDNs. |
 | **A09** Logging | BFF logs no bodies, tokens or cookies; the API's request ID is passed through (`X-Request-ID`). |
 | **A10 / API7** SSRF | The upstream origin is fixed server config (`API_URL`); user input only selects an allowlisted path, never a host. |
-| **API4** Resource consumption | Auth bodies capped at 16 KB (counted bytes, works for chunked bodies), proxy bodies at 30 MB, query strings at 2 KB; 30 s upstream timeout (chat: 5 min, cancelled when the browser disconnects); API rate limits keyed on the real client IP (`X-Forwarded-For`, trusted by uvicorn only from the BFF's address). |
+| **API4** Resource consumption | Auth and proxied JSON bodies capped at 16 KB; uploads at 30 MB (actual stream bytes, including chunked bodies). Queries over 2 KB return 414. Upstream timeout 30 s (chat: 5 min); browser disconnects cancel upstream work. Forwarded IPs are ignored by default (`TRUSTED_PROXY_HOPS=0`); users share the BFF IP bucket until trusted ingress is configured. API refresh is limited to 120 attempts/IP/minute by default. |
 
 ### 6.4 Not exposed to end users
 
@@ -657,7 +659,6 @@ ollama pull qwen3.5:4b                                        # already installe
 ```bash
 cp .env.example .env              # add ANTHROPIC_API_KEY, OPENAI_API_KEY
 podman compose up -d              # core services
-podman compose --profile observability up -d   # optional: Langfuse
 podman compose exec api rag admin create --email you@example.com --tenant demo
 ```
 
@@ -671,23 +672,22 @@ podman compose exec api rag admin create --email you@example.com --tenant demo
 | `ui` | app image | 8501 | Legacy Streamlit (receipts, members, settings) until ported |
 | `postgres` | `postgres:16` | 5432 | named volume, healthcheck |
 | `qdrant` | `qdrant/qdrant` | 6333, 6334 | named volume |
-| `minio` | `minio/minio` | 9000, 9001 | named volume |
+| `objectstore` | `rustfs/rustfs` | 9000, 9001 | named volume, S3-compatible |
 | `mailpit` | `axllent/mailpit` | 1025 (SMTP), 8025 (UI) | dev only |
-| `langfuse` (profile) | Langfuse + its deps | 3000 | optional; heavy |
 | Ollama | **host process** | 11434 | containers use `OLLAMA_BASE_URL=http://host.containers.internal:11434` |
 
 Podman notes:
 
 - **Ollama on the host**, not in a container: the Podman VM on macOS has no Metal GPU access, so containerized Ollama would run on CPU only. If containers can't reach it, start Ollama with `OLLAMA_HOST=0.0.0.0`.
 - Use **named volumes** (not bind mounts) for data services — avoids rootless UID/permission issues and slow file sharing on macOS. On Linux with SELinux, bind mounts need `:Z`.
-- `depends_on: { condition: service_healthy }` with healthchecks on postgres/qdrant so `api`/`worker` start in order; `api` runs `alembic upgrade head` on start in dev only.
-- Integration tests use `testcontainers` against the Podman socket (`DOCKER_HOST=unix://$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')`, `TESTCONTAINERS_RYUK_DISABLED=true`).
+- `depends_on: { condition: service_healthy }` starts dependencies in order. The local Compose API runs `alembic upgrade head` on every start; production should use a coordinated release migration step.
+- Integration tests use running Compose services with a separate `rag_test` database, `rag-test` bucket and `chunks_test` alias/collections. They do not use Testcontainers. Mailpit recipients are unique per test tenant; existing captured email is preserved.
 
 ### 7.2 MVP production
 
 Same OCI image (built with `podman build`) deployed to a PaaS, or a single VM running **Podman Quadlet** (systemd-managed containers). Managed Postgres; Qdrant Cloud or self-hosted with snapshots; S3; real SMTP provider instead of Mailpit (env change only). Ollama on a GPU host if orchestration stays local in prod — otherwise point the `orchestration` route at Claude Haiku via config. Migrations run as a release step.
 
-The `web` image runs behind the HTTPS ingress; the API is **not** exposed publicly, only to `web` (and service accounts via a separate, API-key-only route if needed). Prod env: `ENV=prod`, `WEB_ORIGIN=https://…` (enables `__Host-`/`Secure` cookies, HSTS, `upgrade-insecure-requests`), `PUBLIC_UI_URL` = same origin, `TRUSTED_PROXY_HOPS` = number of proxies that append `X-Forwarded-For` in front of `web` (ingress = 2), and the API's `FORWARDED_ALLOW_IPS` = the web replicas' addresses.
+The `web` image runs behind the HTTPS ingress; keep the API private (with separately authenticated service-account access if needed). Set `ENV=prod`, an HTTPS `WEB_ORIGIN`, and matching `PUBLIC_UI_URL`. Leave `TRUSTED_PROXY_HOPS=0` for direct access; set it to the number of trusted ingress hops that overwrite/append the actual peer IP, normally `1` for one ingress. Next.js preserves an existing `X-Forwarded-For` header and does not add a hop. Prevent direct public access to `web` when enabling forwarded identity. Set the API's `FORWARDED_ALLOW_IPS` to the web replicas' addresses. Legacy Streamlit also needs its own HTTPS/header policy; its untrusted output is rendered as plain text.
 
 ### 7.3 Scale path (only when a metric demands it)
 

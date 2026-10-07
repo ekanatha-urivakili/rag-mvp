@@ -19,6 +19,8 @@ def _pdf(data: bytes) -> list[Page]:
     with pymupdf.open(stream=data, filetype="pdf") as doc:  # type: ignore[no-untyped-call]
         if doc.needs_pass:
             raise ValueError("Encrypted PDFs are not supported")
+        if len(doc) > get_settings().max_pdf_pages:
+            raise ValueError("PDF exceeds the allowed page count")
         if not any(page.get_text().strip() for page in doc):
             return _scanned_pdf(doc)
         pages = pymupdf4llm.to_markdown(doc, page_chunks=True, show_progress=False)
@@ -28,7 +30,7 @@ def _pdf(data: bytes) -> list[Page]:
 def _scanned_pdf(doc: Any) -> list[Page]:
     from rag.receipts.ocr import ocr, render_pdf_page
 
-    pages = list(doc)[: get_settings().max_ocr_pages]
+    pages = (doc[i] for i in range(min(len(doc), get_settings().max_ocr_pages)))
     return [Page(number=i + 1, markdown=ocr(render_pdf_page(page)), ocr=True) for i, page in enumerate(pages)]
 
 

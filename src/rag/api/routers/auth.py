@@ -1,6 +1,4 @@
-from typing import Annotated
-
-from fastapi import APIRouter, Cookie, Request, Response, status
+from fastapi import APIRouter, Request, Response, status
 
 from rag.api.schemas import (
     AcceptInviteIn,
@@ -15,8 +13,9 @@ from rag.api.schemas import (
 )
 from rag.auth import service
 from rag.auth.deps import DB, UserCtx, client_ip
+from rag.core import ratelimit
 from rag.core.config import get_settings
-from rag.core.errors import Unauthorized
+from rag.core.errors import Forbidden, Unauthorized
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 public_router = APIRouter(tags=["auth"])
@@ -41,7 +40,16 @@ def _set_refresh_cookie(response: Response, pair: service.TokenPair) -> TokenOut
     )
 
 
-RefreshCookie = Annotated[str | None, Cookie(alias="rag_refresh")]
+def _refresh_token(body: RefreshIn, request: Request) -> str | None:
+    if body.refresh_token:
+        return body.refresh_token
+    cookie = request.cookies.get(get_settings().refresh_cookie_name)
+    if cookie:
+        # SameSite is a site boundary, not an origin boundary (a sibling subdomain can send this cookie).
+        origin = request.headers.get("origin")
+        if origin not in get_settings().cors_origins:
+            raise Forbidden("Cross-site request blocked")
+    return cookie
 
 
 @router.post("/signup", status_code=status.HTTP_202_ACCEPTED)
@@ -67,16 +75,18 @@ async def login(body: LoginIn, request: Request, response: Response, db: DB) -> 
 
 
 @router.post("/refresh", response_model=TokenOut)
-async def refresh(body: RefreshIn, response: Response, db: DB, cookie: RefreshCookie = None) -> TokenOut:
-    raw = body.refresh_token or cookie
+async def refresh(body: RefreshIn, request: Request, response: Response, db: DB) -> TokenOut:
+    s = get_settings()
+    await ratelimit.hit(db, f"refresh:ip:{client_ip(request)}", s.rl_refresh_per_ip, s.rl_refresh_window_s)
+    raw = _refresh_token(body, request)
     if not raw:
         raise Unauthorized("Refresh token required")
     return _set_refresh_cookie(response, await service.refresh(db, raw))
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(body: RefreshIn, response: Response, ctx: UserCtx, db: DB, cookie: RefreshCookie = None) -> None:
-    await service.logout(db, ctx, body.refresh_token or cookie)
+async def logout(body: RefreshIn, response: Response, ctx: UserCtx, db: DB) -> None:
+    await service.logout(db, ctx, body.refresh_token)
     response.delete_cookie(get_settings().refresh_cookie_name, path="/v1/auth")
 
 
