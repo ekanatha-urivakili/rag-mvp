@@ -1,35 +1,105 @@
 # RAG MVP
 
-Multi-tenant document Q&A. Users upload documents and ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/rag_mvp_architecture.md`](docs/rag_mvp_architecture.md).
+Multi-tenant document Q&A with receipt extraction. Users upload documents and receipt photos, then ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/rag_mvp_architecture.md`](docs/rag_mvp_architecture.md).
 
 ```
 Streamlit UI ──REST/SSE──> FastAPI (JWT/API key → RBAC) ──> LangGraph corrective-RAG graph
                                  │                               ├─ Ollama qwen3.5:4b (orchestration)
                                  │                               └─ Claude Sonnet 5.5 → OpenAI → Ollama (generation)
-                                 ├─ Postgres (source of truth, jobs outbox, rate limits, audit)
+                                 ├─ Postgres (source of truth, jobs outbox, rate limits, audit, receipts)
                                  ├─ Qdrant (dense bge-m3 + BM25 sparse, RRF) + local cross-encoder rerank
-                                 └─ S3 (RustFS locally)        Worker: ingest / email (Mailpit) / reindex / purge
+                                 └─ S3 (RustFS locally)
+Worker: ingest (parse / OCR / receipt extraction: qwen3-vl → Claude → OpenAI) · email (Mailpit) · reindex · purge
 ```
 
-## Quickstart (Podman)
+## Features
+
+**Chat over your documents**
+- Corrective RAG: query analysis, hybrid retrieval (dense + BM25, fused with RRF), cross-encoder reranking, relevance grading, and at most one query rewrite before answering.
+- Streamed answers over SSE, with citations validated against the retrieved chunks. Uncited answers become an explicit "not in your documents" response.
+- The UI shows the current step and the model in use, including fallbacks. Every answer records its provider, model, token usage and latency.
+- Conversation history, per-message thumbs up/down feedback, and follow-up questions that use earlier turns.
+- Model routing with fallbacks (`config/models.yaml`): local Ollama first for orchestration, Claude → OpenAI → local for generation. Runs fully local with no cloud keys.
+
+**Documents**
+- Upload PDF, DOCX, HTML, Markdown, plain text, and JPEG/PNG/WebP images (25 MB max). The type is detected from content, never from the client header.
+- Scanned PDFs and images are OCR'd (RapidOCR, CPU).
+- Background ingestion with live progress, retries, versioning (re-uploading changed content creates version N+1), idempotent re-upload, and retry by re-uploading a failed file.
+- Deletion removes chunks, vectors and raw files asynchronously.
+
+**Receipts** ([details](#receipts))
+- Attach a receipt photo in chat, or upload it on the Documents page. A vision model extracts merchant, date and time, line items, discounts, subtotal, tax, tip, total, payment method, and card brand with the last 4 digits.
+- Arithmetic is cross-checked and mismatches are flagged, never "fixed". Full card numbers are masked.
+- A Receipts page lists receipts and shows details. Receipts are searchable from chat.
+
+**Accounts and workspaces**
+- Self-serve signup with email verification creates a private workspace where you are admin ([details](#signup)). Set `SIGNUP_ENABLED=false` for invitation-only use.
+- Email invitations into existing workspaces, password reset, and switching between workspaces.
+- Roles: **viewer** (chat, read documents), **editor** (+ upload/delete documents), **admin** (+ members, API keys, audit log). Guards prevent removing or demoting the last admin.
+- API keys for programmatic access, scoped to a tenant and role.
+- An audit log of security-relevant events.
+
+**Platform**
+- Tenant isolation is enforced in Postgres and Qdrant. Another tenant's IDs return 404.
+- Postgres outbox for jobs and email, rate limits shared across replicas, and structured JSON logs with secret redaction.
+- Zero-downtime re-embedding (`rag reindex`) through a Qdrant alias swap.
+- Retrieval and faithfulness evals (`evals/run_eval.py`).
+- OWASP Web/API Top 10 controls ([mapping](#owasp-coverage)).
+
+## Quickstart
 
 ```bash
-cp .env.example .env            # then fill JWT_SECRET, POSTGRES_PASSWORD, QDRANT_API_KEY, S3_SECRET_KEY (+ provider keys)
-OLLAMA_HOST=0.0.0.0 ollama serve   # see "Ollama and containers" below
-ollama pull qwen3.5:4b && ollama pull bge-m3
-
-podman build -t localhost/rag-mvp:latest -f Containerfile .
-podman compose up -d --no-build
-podman compose exec api rag admin create --email you@example.com --tenant demo   # prompts for the password
+./start.sh
 ```
+
+`start.sh` does the following:
+
+1. Checks that Podman is installed and running. On macOS it starts the Podman machine if it's stopped.
+2. Creates `.env` from `.env.example` with generated secrets if it doesn't exist yet.
+3. Checks that the ports are free, and warns if Ollama or its models are missing.
+4. Starts Postgres, Qdrant, RustFS and Mailpit, and waits for them to be healthy.
+5. Runs ruff, strict mypy, and the full unit + integration suite.
+6. Builds the image, starts the API, worker and UI, waits for health, and opens the UI in your browser.
+
+| Command | What it does |
+| --- | --- |
+| `./start.sh` | Everything above |
+| `./start.sh --skip-tests` | Start without running checks and tests |
+| `./start.sh --no-build` | Reuse the existing `localhost/rag-mvp:latest` image |
+| `./start.sh --no-browser` | Don't open the browser |
+| `./start.sh test` | Prerequisite checks, infrastructure, and tests only |
+| `./start.sh stop` | Stop the stack. Data volumes are kept |
+
+Once it's running:
 
 | URL | What |
 | --- | --- |
-| http://localhost:8501 | UI |
+| http://localhost:8501 | UI. Use **New here? Sign up**, or create an admin (below) |
 | http://localhost:8000/docs | OpenAPI (disabled when `ENV=prod`) |
 | http://localhost:8025 | Project Mailpit inbox (signup verification, invites and password resets). Override with `MAILPIT_UI_PORT` |
 
+```bash
+podman compose exec api rag admin create --email you@example.com --tenant demo   # prompts for the password
+```
+
+**Local models.** Chat, embeddings and receipt extraction default to Ollama on the host. Tests don't need it.
+
+```bash
+OLLAMA_HOST=0.0.0.0 ollama serve
+ollama pull qwen3.5:4b && ollama pull bge-m3 && ollama pull qwen3-vl
+```
+
+Add `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` to `.env` to enable the cloud routes.
+
 **Ollama and containers.** Ollama runs on the host so it can use the Metal GPU. Containers reach it through `host.containers.internal`, which only works when Ollama listens on all interfaces. That also exposes Ollama, which has no authentication, to your LAN. Keep the macOS firewall on, or use a cloud `orchestration` route instead.
+
+### Manual setup (Podman)
+
+```bash
+cp .env.example .env            # then fill JWT_SECRET, POSTGRES_PASSWORD, QDRANT_API_KEY, S3_SECRET_KEY (+ provider keys)
+podman build -t localhost/rag-mvp:latest -f Containerfile .
+podman compose up -d --no-build
+```
 
 ### Running on the host (development)
 
@@ -43,9 +113,28 @@ python -m rag.worker &
 (cd ui && API_URL=http://localhost:8000 streamlit run app.py)
 ```
 
-### Tests and checks
+## API
+
+All routes are versioned under `/v1`. Each one requires a JWT (`Authorization: Bearer`) or an API key (`X-API-Key`), except the public auth routes and health checks.
+
+| Area | Endpoints | Permission |
+| --- | --- | --- |
+| Auth | `POST /auth/signup`, `/auth/signup/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/switch-tenant`, `/auth/password/forgot`, `/auth/password/reset` | public, except logout/switch |
+| Profile | `GET /me` | any role |
+| Chat | `POST /chat` (SSE: `status`, `model`, `token`, `answer`, `citations`, `done`), `GET /conversations[/{id}]`, `POST /messages/{id}/feedback` | `chat:use` |
+| Documents | `POST /documents`, `GET /documents[/{id}]`, `DELETE /documents/{id}` | `document:read` / `write` / `delete` |
+| Receipts | `GET /receipts`, `GET /receipts/{document_id}` | `document:read` |
+| Members | `GET /members`, `PATCH`/`DELETE /members/{user_id}`, `POST`/`GET /invitations` | `member:manage` |
+| API keys | `GET`/`POST /api-keys`, `DELETE /api-keys/{id}` | `apikey:manage` |
+| Audit | `GET /audit-log` | `audit:read` |
+| Health | `GET /healthz`, `GET /readyz` (unversioned) | public |
+
+Clients must use the SSE `answer` event as the final answer text. Streamed `token` events are provisional.
+
+## Tests and checks
 
 ```bash
+./start.sh test          # starts the test infrastructure, then runs everything below
 uv run ruff check src tests ui evals && uv run mypy src   # mypy runs in strict mode
 uv run pytest            # unit tests, plus integration tests against the compose services (uses database rag_test)
 uv run python evals/run_eval.py --tenant-id <uuid> --provider anthropic --min-recall 0.85 --min-faithfulness 0.90
@@ -53,12 +142,15 @@ uv run python evals/run_eval.py --tenant-id <uuid> --provider anthropic --min-re
 
 The integration suite covers these flows end to end, including real emails read back from Mailpit:
 
+- signup → verification email → private workspace → login, plus disabled signup, expired/reused links and rate limits
 - invite → email → accept → login
 - password reset, with session revocation
-- refresh-token rotation and reuse detection
+- refresh-token rotation and reuse detection; logout and replay revoke access tokens immediately
 - the RBAC matrix: every route × every role
 - tenant and owner isolation (BOLA)
-- upload type spoofing, idempotent re-upload and versioning
+- upload type spoofing, idempotent re-upload, versioning and failed-upload retry
+- receipt upload → OCR → extraction → receipts API, including tenant isolation and delete cascade
+- concurrency regressions: concurrent uploads, worker lease expiry, reindex recovery and stale-vector filtering
 
 `tests/unit/test_route_coverage.py` fails CI if someone adds a route without an auth dependency.
 
@@ -153,4 +245,4 @@ Integration tests use `rag_test`, bucket `rag-test`, alias `chunks_test`, and ph
 the destructive integration suite at a production Postgres instance.
 
 Access tokens issued before `sid` was added require refresh or a new sign-in. Existing refresh
-tokens remain usable. `.env` and existing demo data are preserved by the local image update.
+tokens remain usable.
