@@ -73,9 +73,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
 
-  # Legacy Streamlit UI: still serves Receipts, Members and Settings until they move to `web`.
+  # Optional legacy UI; all workspace features are available in Next.js.
   ui:
     <<: *app
+    profiles: [legacy]
     env_file: []
     volumes: []
     command: >

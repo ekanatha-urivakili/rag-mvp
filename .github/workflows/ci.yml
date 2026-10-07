@@ -47,8 +47,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --extra dev --frozen
-      - run: uv run ruff check src tests ui evals
-      - run: uv run ruff format --check src tests ui evals
+      - run: uv run ruff check src tests ui evals scripts
+      - run: uv run ruff format --check src tests ui evals scripts
       - run: uv run mypy src
       - run: uv run pytest -q
       - name: Dependency vulnerability audit (OWASP A06)

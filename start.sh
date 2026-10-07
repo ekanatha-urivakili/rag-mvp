@@ -12,7 +12,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 UI_URL="http://localhost:3000"
-LEGACY_UI_URL="http://localhost:8501"
 API_URL="http://localhost:8000"
 PROJECT="rag-mvp"
 INFRA=(postgres qdrant objectstore mailpit)
@@ -106,7 +105,7 @@ ok "Required secrets are set"
 step "Checking ports"
 PG_PORT="${POSTGRES_HOST_PORT:-5432}"
 ports=("$PG_PORT" 6333 9000 "${MAILPIT_SMTP_PORT:-1025}" "${MAILPIT_UI_PORT:-8025}")
-[[ "$mode" == all ]] && ports+=(8000 8501 3000)
+[[ "$mode" == all ]] && ports+=(8000 3000)
 ours=$(podman ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Ports}}' 2>/dev/null || true)
 busy=0
 for port in "${ports[@]}"; do
@@ -158,8 +157,8 @@ if [[ "$run_tests" == 1 ]]; then
   step "Running lint, type checks and tests"
   command -v uv >/dev/null || die "uv is not installed. Install it from https://docs.astral.sh/uv/ or use --skip-tests."
   uv sync --extra dev --frozen -q
-  uv run ruff check src tests ui evals
-  uv run ruff format --check src tests ui evals
+  uv run ruff check src tests ui evals scripts
+  uv run ruff format --check src tests ui evals scripts
   uv run mypy src
   # Point the integration suite at this project's containers, whatever DATABASE_URL in .env says.
   pg_pass_q=$(uv run python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$POSTGRES_PASSWORD")
@@ -183,18 +182,17 @@ if [[ "$build" == 1 ]]; then
   ok "Images built"
 fi
 
-step "Starting api, worker, web and legacy ui"
-compose up -d --no-build
+step "Starting api, worker and web"
+compose up -d --no-build api worker web
 # The API applies migrations and waits (up to 120s) for local model warmup before it reports healthy.
 wait_for api 240 curl -sf "${API_URL}/healthz"
 wait_for web 120 curl -sf -o /dev/null "${UI_URL}/login"
-wait_for ui 120 curl -sf "${LEGACY_UI_URL}/_stcore/health"
 curl -sf "${API_URL}/readyz" >/dev/null || warn "API /readyz reports a dependency down: curl ${API_URL}/readyz"
 
 step "Ready"
 cat <<EOF
   UI       ${UI_URL}
-  Legacy   ${LEGACY_UI_URL}   (Receipts, Members, Settings until they move to the web UI)
+  Legacy   optional: podman compose --profile legacy up -d ui (localhost:8501)
   API docs ${API_URL}/docs
   Mailpit  http://localhost:${MAILPIT_UI_PORT:-8025}   (signup verification, invites, password resets)
 

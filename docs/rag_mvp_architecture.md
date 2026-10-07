@@ -78,7 +78,7 @@ Current implementation/security evidence: [principal review, 7 October 2026](PRI
 | Email | `aiosmtplib` + Jinja2 templates; **Mailpit** locally | Outbox via jobs table (§4.8) |
 | Observability | OpenTelemetry + Langfuse, structured JSON logs | Langfuse is an optional compose profile locally (it's heavy) |
 | Evaluation | Retrieval metrics + RAGAS (faithfulness, answer relevancy) | |
-| UI | Next.js 16 (App Router) + React 19 + TypeScript, Tailwind CSS 4, TanStack Query | Runs as a BFF in front of the API (§6). Streamlit stays for Receipts/Members/Settings until they are ported, then is removed |
+| UI | Next.js 16 (App Router) + React 19 + TypeScript, Tailwind CSS 4, TanStack Query | Runs as a BFF in front of the API (§6). Receipts, Members and Settings are implemented in Next.js; Streamlit is an optional legacy profile |
 | Containers | **Podman** (rootless) + Compose spec (`compose.yaml`) | Same OCI images in prod |
 
 ---
@@ -490,10 +490,10 @@ rag-mvp/
 │       ├── app/api/auth/[action]/route.ts   # login/signup/reset/invite/switch/logout → session cookie
 │       ├── app/api/v1/[...path]/route.ts    # allowlisted proxy to the API (JSON, multipart, SSE)
 │       ├── app/(auth)/…        # sign in, verify signup, reset password, accept invite
-│       ├── app/(app)/…         # chat (/ and /c/[id]), documents
-│       ├── components/         # chat thread, history sidebar, markdown, documents
+│       ├── app/(app)/…         # chat, documents, receipts, members, settings
+│       ├── components/         # workspace shell, chat, documents, receipts, members, keys/audit
 │       └── lib/                # session (JWE cookie), security (CSRF, allowlist, IP), upstream, SSE parser
-├── ui/                         # Streamlit (legacy: receipts, members, settings until ported)
+├── ui/                         # Streamlit (optional legacy UI)
 ├── evals/
 │   ├── golden.jsonl            # {question, expected_doc_ids, reference_answer}
 │   └── run_eval.py             # --route generation --provider anthropic|openai|ollama
@@ -606,9 +606,15 @@ The shell loads `/v1/me` server-side and shows/hides actions by permission (UX o
 | `/` | `chat:use` | New chat: history sidebar + empty thread |
 | `/c/{id}` | `chat:use` (own only) | Past conversation: latest 200 messages, "Load earlier", composer continues it. Streamed answers, status/model line, `[n]` citations with **Sources**, 👍/👎 feedback, Stop button |
 | `/documents` | `document:read` | Live status table (polls only while ingesting); upload/delete with `document:write`/`document:delete` |
-| Receipts, Members, Settings | as before | **Still in Streamlit** (`:8501`) — next migration step, then Streamlit is removed |
+| `/receipts` | `document:read` | Paginated extracted receipts, details/line items/totals/payment/warnings; upload via Documents |
+| `/members` | `member:manage` | Email invitations, pending invitations, paginated member list, role changes, confirmed removal; own role/removal disabled |
+| `/settings` | `apikey:manage` and/or `audit:read` | Paginated keys, creation with one-time secret display/copy/dismiss, confirmed revocation, audit history with keyset pagination |
 
 History sidebar: "New chat", debounced title search, groups (Today / Yesterday / Previous 7 days / Older), keyset "Load more", inline rename, two-step delete. The first answer in a new chat moves the URL to `/c/{id}` without re-fetching.
+
+Workspace navigation shows Chat/Documents/Receipts to viewers and editors; Members and Settings appear when the user has their management/audit permissions. Direct page access also shows a permission message when denied, while the API remains the authorization boundary. Admin lists use 25-row pages; audit history uses an ID cursor. Receipt amounts are displayed as returned decimal strings with currency, and warnings remain visible. API-key secrets are held only in transient component state after creation and can be copied/dismissed; list responses contain only prefixes.
+
+Implementation verification (7 October 2026): 62 frontend tests and 135 backend tests pass; the production Podman web image builds with Turbopack and runs locally. `scripts/smoke_workspace.py` exercises the live BFF/API/email/role/key/receipt/audit paths with temporary fixtures and cleanup. Its receipt is seeded; upload/OCR is covered separately by integration tests with model extraction faked. No browser connection was available for visual/click-through checks. Browser end-to-end automation remains separate work.
 
 ### 6.2 Session and token handling
 
@@ -621,7 +627,7 @@ History sidebar: "New chat", debounced title search, groups (Today / Yesterday /
 
 | Risk | Control in `web/` |
 | --- | --- |
-| **A01 / API1, API5** Broken access control | No authorization logic in the UI; the API checks tenant, owner and role on every call. The BFF proxies only an explicit `(method, path)` allowlist with UUID-shaped IDs (`lib/security.ts`); admin routes are not reachable until their pages exist. Path segments are restricted to `[A-Za-z0-9-]` (no traversal / encoded slashes). |
+| **A01 / API1, API5** Broken access control | No authorization logic in the UI; the API checks tenant, owner and role on every call. The BFF proxies only an explicit `(method, path)` allowlist with UUID-shaped IDs (`lib/security.ts`); member/invitation/key/audit routes are allowlisted for the implemented pages; the API enforces their permissions. Path segments are restricted to `[A-Za-z0-9-]` (no traversal / encoded slashes). |
 | **A01** CSRF | `SameSite=Strict` cookie **and** every non-GET BFF request must carry `Origin == WEB_ORIGIN` (fallback `Sec-Fetch-Site: same-origin`); otherwise 403. GETs are side-effect free. |
 | **A02** Cryptographic failures | Tokens only inside an AES-256-GCM JWE cookie; HSTS (2 years) and `upgrade-insecure-requests` when https; `Secure` cookies; prod refuses a non-https `WEB_ORIGIN`. |
 | **A03** Injection / XSS | React escaping everywhere; ESLint bans `dangerouslySetInnerHTML`. Model output is rendered with `react-markdown` with **raw HTML skipped**, images disallowed, `javascript:` URLs stripped, links `rel="noopener noreferrer nofollow"`. Per-request **nonce CSP** with `strict-dynamic`, `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`, `img-src 'self' data: blob:` (blocks prompt-injection exfiltration through remote images), `connect-src 'self'`. |
@@ -669,7 +675,7 @@ podman compose exec api rag admin create --email you@example.com --tenant demo
 | `api` | app image | 8000 | `uvicorn rag.api.main:app` |
 | `worker` | app image | — | `python -m rag.worker`; reranker model cached in a volume |
 | `web` | `web/Containerfile` | 3000 | Next.js UI + BFF; only service the browser uses; reaches `api` over the private `bff` network (fixed IP `172.31.250.2`, the only address the API trusts for `X-Forwarded-For`) |
-| `ui` | app image | 8501 | Legacy Streamlit (receipts, members, settings) until ported |
+| `ui` | app image | 8501 | Optional legacy Streamlit; start with `--profile legacy` |
 | `postgres` | `postgres:16` | 5432 | named volume, healthcheck |
 | `qdrant` | `qdrant/qdrant` | 6333, 6334 | named volume |
 | `objectstore` | `rustfs/rustfs` | 9000, 9001 | named volume, S3-compatible |
@@ -754,8 +760,9 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 
 - **Done in this step:** migration `0004` (`conversations.updated_at`, indexes); history list ordering, keyset paging, title search, rename, delete, bounded message window with "load earlier"; tests for ordering, paging, search, rename/delete cascade, continuation context, and owner-only access.
 - **Done in this step:** `web/` BFF (session cookie, refresh single-flight, allowlisted proxy, CSRF, CSP nonce, security headers); auth flows; chat with history sidebar and continuation; documents. CI job: lint, typecheck, format, unit tests, build, `npm audit`.
-- **Next:** port Receipts, Members (invites, roles), Settings (API keys, audit log) — extend the BFF allowlist per page; Playwright end-to-end tests (login → chat → reopen → continue; CSRF and CSP assertions); remove Streamlit and the `ui` service; rolling conversation summary if long-chat evals require it.
-- **Exit:** every Streamlit page has a Next.js equivalent; e2e suite green in CI; Streamlit removed.
+- **Implemented:** Receipts, Members (invitations/roles/removal), Settings (API keys/audit history), permission-aware responsive navigation, and the corresponding BFF allowlist. Streamlit is optional; the default launcher serves all workspace features in Next.js.
+- **Next:** automated browser end-to-end tests in CI and complete retirement of legacy code when no longer needed; rolling conversation summary if long-chat evals require it.
+- **Exit:** all workspace pages have Next.js equivalents (implemented). Browser CI coverage and complete removal of legacy code remain outstanding; API/BFF functional verification is separate from browser tests.
 
 ### Phase 6 — Hardening & Launch (Week 7)
 

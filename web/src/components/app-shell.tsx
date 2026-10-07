@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useContext, useState } from "react";
 import { ApiError, sendJson } from "@/lib/client";
+import { navigationFor } from "@/lib/navigation";
 import type { Me } from "@/lib/types";
 
 const MeContext = createContext<Me | null>(null);
@@ -49,13 +50,9 @@ function TopBar() {
   const pathname = usePathname();
   const router = useRouter();
   const qc = useQueryClient();
-  const canReadDocs = useCan("document:read");
   const [error, setError] = useState<string | null>(null);
   const others = me.tenants.filter((t) => t.id !== me.tenant.id);
-  const nav = [
-    { href: "/", label: "Chat", active: pathname === "/" || pathname.startsWith("/c/") },
-    ...(canReadDocs ? [{ href: "/documents", label: "Documents", active: pathname.startsWith("/documents") }] : []),
-  ];
+  const nav = navigationFor(me.permissions, pathname);
 
   async function switchTo(tenantId: string) {
     try {
@@ -76,15 +73,18 @@ function TopBar() {
   }
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-4 border-b border-zinc-200 px-4 dark:border-zinc-800">
-      <span className="text-sm font-semibold">RAG Assistant</span>
-      <nav className="flex gap-1 text-sm">
+    <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-zinc-200 px-4 py-2 dark:border-zinc-800">
+      <span className="shrink-0 text-sm font-semibold">RAG Assistant</span>
+      <nav
+        aria-label="Workspace"
+        className="order-last flex w-full gap-1 overflow-x-auto text-sm lg:order-none lg:w-auto"
+      >
         {nav.map((n) => (
           <Link
             key={n.href}
             href={n.href}
             aria-current={n.active ? "page" : undefined}
-            className={`rounded-md px-2.5 py-1.5 ${n.active ? "bg-zinc-100 font-medium dark:bg-zinc-800" : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"}`}
+            className={`shrink-0 rounded-md px-2.5 py-1.5 ${n.active ? "bg-zinc-100 font-medium dark:bg-zinc-800" : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"}`}
           >
             {n.label}
           </Link>
@@ -106,11 +106,13 @@ function TopBar() {
             ))}
           </select>
         ) : (
-          <span className="hidden text-zinc-500 sm:inline">
+          <span className="hidden max-w-48 truncate text-zinc-500 xl:inline" title={me.tenant.name}>
             {me.tenant.name} · {me.tenant.role}
           </span>
         )}
-        <span className="hidden text-zinc-500 md:inline">{me.email}</span>
+        <span className="hidden max-w-56 truncate text-zinc-500 xl:inline" title={me.email ?? undefined}>
+          {me.email}
+        </span>
         <button
           onClick={() => void signOut()}
           className="rounded-md px-2 py-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"

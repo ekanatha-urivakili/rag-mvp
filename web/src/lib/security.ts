@@ -36,7 +36,7 @@ const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 
 /**
  * The only API routes the browser may reach through the BFF (least privilege, OWASP API9).
- * Admin routes are added here when their pages move to this app.
+ * The API enforces tenant, role and user-session permissions on each allowed route.
  */
 const ALLOWED: ReadonlyArray<readonly [string, RegExp]> = [
   ["GET", /^me$/],
@@ -52,6 +52,15 @@ const ALLOWED: ReadonlyArray<readonly [string, RegExp]> = [
   ["DELETE", new RegExp(`^documents/${UUID}$`)],
   ["GET", /^receipts$/],
   ["GET", new RegExp(`^receipts/${UUID}$`)],
+  ["GET", /^members$/],
+  ["PATCH", new RegExp(`^members/${UUID}$`)],
+  ["DELETE", new RegExp(`^members/${UUID}$`)],
+  ["GET", /^invitations$/],
+  ["POST", /^invitations$/],
+  ["GET", /^api-keys$/],
+  ["POST", /^api-keys$/],
+  ["DELETE", new RegExp(`^api-keys/${UUID}$`)],
+  ["GET", /^audit-log$/],
 ];
 
 /** Maps `/api/v1/<segments>` to an upstream `/v1/...` path, or null if not allowlisted. */
