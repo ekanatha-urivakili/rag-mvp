@@ -28,7 +28,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="rag")
     sub = parser.add_subparsers(dest="group", required=True)
     admin = sub.add_parser("admin").add_subparsers(dest="cmd", required=True)
-    create = admin.add_parser("create", help="Create the first tenant + admin (no open sign-up)")
+    create = admin.add_parser("create", help="Create a tenant and admin account")
     create.add_argument("--email", required=True)
     create.add_argument("--tenant", required=True)
     reindex = sub.add_parser("reindex", help="Re-embed all chunks into a new collection and flip the alias")

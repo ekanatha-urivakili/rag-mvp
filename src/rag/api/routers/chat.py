@@ -111,6 +111,8 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
                 yield _sse("status", {"step": chunk["step"]})
             elif kind == "token":
                 yield _sse("token", {"text": chunk["text"]})
+            elif kind == "answer":
+                yield _sse("answer", {"text": chunk["text"]})
             elif kind == "citations":
                 yield _sse("citations", chunk["citations"])
     except LLMUnavailable:

@@ -31,13 +31,25 @@ class ObjectStorage:
 
         await asyncio.to_thread(_ensure)
 
+    async def healthy(self) -> bool:
+        try:
+            await asyncio.to_thread(self._s3.head_bucket, Bucket=self._bucket)
+            return True
+        except Exception:
+            return False
+
     async def put(self, key: str, data: bytes, content_type: str) -> None:
         await asyncio.to_thread(self._s3.put_object, Bucket=self._bucket, Key=key, Body=data, ContentType=content_type)
 
     async def get(self, key: str) -> bytes:
         resp = await asyncio.to_thread(self._s3.get_object, Bucket=self._bucket, Key=key)
-        body: bytes = await asyncio.to_thread(resp["Body"].read)
-        return body
+
+        def read_body() -> bytes:
+            with resp["Body"] as body:
+                data: bytes = body.read()
+                return data
+
+        return await asyncio.to_thread(read_body)
 
     async def delete_prefix(self, prefix: str) -> None:
         def _delete() -> None:

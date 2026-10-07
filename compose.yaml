@@ -43,6 +43,8 @@ services:
 
   ui:
     <<: *app
+    env_file: []
+    volumes: []
     command: >
       streamlit run ui/app.py --server.port 8501 --server.address 0.0.0.0
       --server.enableXsrfProtection true --browser.gatherUsageStats false
@@ -78,7 +80,7 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # S3-compatible object storage (RustFS; MinIO no longer publishes public images). Swap via S3_* env.
+  # S3-compatible object storage (RustFS). Swap via S3_* env.
   objectstore:
     image: docker.io/rustfs/rustfs:latest
     environment:
@@ -94,6 +96,9 @@ services:
 
   mailpit:
     image: docker.io/axllent/mailpit:latest
+    environment:
+      MP_DATABASE: /data/mailpit.db
+    volumes: [mailpit:/data]
     ports: ["127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025", "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"]
     restart: unless-stopped
 
@@ -102,3 +107,4 @@ volumes:
   qdrant:
   objectstore:
   models:
+  mailpit:

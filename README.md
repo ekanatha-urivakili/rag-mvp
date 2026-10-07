@@ -1,6 +1,6 @@
 # RAG MVP
 
-Multi-tenant document Q&A. Users upload documents and ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`../rag_mvp_architecture.md`](../rag_mvp_architecture.md).
+Multi-tenant document Q&A. Users upload documents and ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/rag_mvp_architecture.md`](docs/rag_mvp_architecture.md).
 
 ```
 Streamlit UI ──REST/SSE──> FastAPI (JWT/API key → RBAC) ──> LangGraph corrective-RAG graph
@@ -27,7 +27,7 @@ podman compose exec api rag admin create --email you@example.com --tenant demo  
 | --- | --- |
 | http://localhost:8501 | UI |
 | http://localhost:8000/docs | OpenAPI (disabled when `ENV=prod`) |
-| http://localhost:8025 | Mailpit (invites and password resets). Override with `MAILPIT_UI_PORT` |
+| http://localhost:8025 | Project Mailpit inbox (invites and password resets). Override with `MAILPIT_UI_PORT` |
 
 **Ollama and containers.** Ollama runs on the host so it can use the Metal GPU. Containers reach it through `host.containers.internal`, which only works when Ollama listens on all interfaces. That also exposes Ollama, which has no authentication, to your LAN. Keep the macOS firewall on, or use a cloud `orchestration` route instead.
 
@@ -66,17 +66,17 @@ The integration suite covers these flows end to end, including real emails read 
 
 | Risk (Web 2021 / API 2023) | Implementation |
 | --- | --- |
-| **API1 BOLA / A01** | `tenant_id` and `user_id` always come from the token, never the request body. Every query filters by `ctx.tenant_id`. Conversations and feedback also filter by `user_id`, so admins can't read other users' chats. The Qdrant tenant filter is applied inside `VectorStore`. Another tenant's IDs return 404, the same as missing IDs. UUIDv4 IDs. |
-| **API2 Broken auth / A07** | argon2id with transparent rehash. 12–128 character policy (rejects passwords containing the email local-part). JWT is HS256 with the algorithm pinned and `iss`/`aud`/`exp`/`nbf`/`iat`/`jti` required plus a `typ` check. Access TTL is 15 min. Sub-second `iat` makes revocation via `tokens_valid_after` (password reset) exact. Refresh tokens are opaque and stored as SHA-256 hashes. They rotate on every use, and reusing a rotated token revokes the whole token family. Refresh cookie: `HttpOnly`, `SameSite=Strict`, path-scoped. Login failures look identical whether or not the account exists, including timing (a dummy hash is verified). |
+| **API1 BOLA / A01** | `tenant_id` and `user_id` always come from the token, never the request body. Tenant-owned resource queries filter by the authenticated tenant. Retrieval also checks Postgres for ready documents at the exact indexed version, excluding partial, failed, deleted and superseded content. Conversations and feedback also filter by `user_id`, so admins can't read other users' chats. The Qdrant tenant filter is applied inside `VectorStore`. Another tenant's IDs return 404, the same as missing IDs. UUIDv4 IDs. |
+| **API2 Broken auth / A07** | argon2id with transparent rehash. 12–128 character policy (rejects passwords containing the email local-part). JWT is HS256 with the algorithm pinned and `iss`/`aud`/`exp`/`nbf`/`iat`/`jti`/`sid` required plus a `typ` check. Access TTL is 15 min. Sub-second `iat` makes revocation via `tokens_valid_after` (password reset) exact. Refresh tokens are opaque and stored as SHA-256 hashes. They rotate on every use, and reusing a rotated token revokes the whole token family. JWT `sid` binds access tokens to that family; each request checks a live refresh record, so logout and replay detection also revoke access immediately. Password reset invalidates all outstanding reset links and serializes against login/refresh. Refresh cookie: `HttpOnly`, `SameSite=Strict`, path-scoped. Login failures look identical whether or not the account exists, including timing (a dummy hash is verified). |
 | **API3 BOPLA** | Every input schema sets `extra="forbid"` (no mass assignment). Explicit response models, so hashes and secrets never serialize. Validation errors never echo submitted values. |
-| **API4 Resource consumption** | Postgres fixed-window rate limits shared across replicas: login per IP and per email, password reset per IP and per email, chat per tenant and per user, uploads per tenant. 25 MB upload cap (streamed and bounded) plus a request-body cap. Zip-bomb guard on DOCX. Pagination caps. 4k-character questions. LLM `max_tokens` and timeouts. Graph `recursion_limit`, with at most 1 rewrite. |
+| **API4 Resource consumption** | Postgres fixed-window rate limits shared across replicas: login per IP and per email, reset/accept per IP, forgot-password per IP and per email, chat per tenant and per user, uploads per tenant. 25 MB upload cap (streamed and bounded) plus an actual-byte request-body cap, including chunked multipart requests without an honest Content-Length. Zip-bomb guard on DOCX. Pagination caps. 4k-character questions. LLM `max_tokens` and timeouts. Graph `recursion_limit`, with at most 1 rewrite. |
 | **API5 BFLA** | `require(Permission)` dependency on every route. The role is read from the DB on every request, so a demotion or removal applies immediately. RBAC matrix test, route-coverage test, last-admin and self-change guardrails. |
 | **API6 Sensitive flows** | Invite and reset are single-use, short-lived and hashed at rest. Forgot-password always returns 202 (no account enumeration). |
 | **API7 SSRF / A10** | No user-supplied URLs are ever fetched. HTML is parsed from the uploaded bytes only. Email links are built only from `PUBLIC_UI_URL`. |
-| **API8 Misconfig / A05** | Security headers (CSP `default-src 'none'`, `nosniff`, `DENY`, `no-referrer`, `no-store`, HSTS in prod). CORS allowlist. `TrustedHostMiddleware`. No server header. Docs and OpenAPI off in prod. Startup refuses a weak `JWT_SECRET`, and refuses CORS `*` or non-https URLs in prod. Containers run non-root with `cap_drop: ALL` and `no-new-privileges`, and ports bind to 127.0.0.1. |
+| **API8 Misconfig / A05** | API security headers (CSP `default-src 'none'`, `nosniff`, `DENY`, `no-referrer`, `no-store`, HSTS in prod). CORS allowlist. `TrustedHostMiddleware`. No server header. Docs and OpenAPI off in prod. Startup refuses a weak `JWT_SECRET`, and in prod rejects wildcard CORS/hosts, non-HTTPS UI/CORS URLs, missing Qdrant authentication and default S3 secrets. Containers run non-root with `cap_drop: ALL` and `no-new-privileges`, and ports bind to 127.0.0.1. |
 | **API9 Inventory** | Versioned `/v1` and a single router registry. OpenAPI is hidden in prod. |
 | **API10 Unsafe API consumption** | Every LLM structured output is re-validated with Pydantic. Fallbacks on timeout, error or refusal. |
-| **A03 Injection** | SQLAlchemy bound parameters only. Prompt injection: retrieved text sits in `<doc>` blocks labelled as data, and `</doc>` breakouts are neutralized. No side-effecting tools. Citations are validated deterministically. Jinja autoescapes HTML email. Email subject header-injection guard. Streamlit never uses `unsafe_allow_html`. |
+| **A03 Injection** | SQLAlchemy bound parameters only. Prompt injection: retrieved text sits in `<doc>` blocks labelled as data, and `</doc>` breakouts are neutralized. No side-effecting tools. Citation indices are validated deterministically; the SSE `answer` event carries the canonical cleaned text, and the UI replaces provisional text with it. Uncited document answers become insufficient-context responses. Valid indices alone do not prove factual faithfulness. Jinja autoescapes HTML email. Email subject header-injection guard. Streamlit never uses `unsafe_allow_html`. |
 | **A04 Insecure design** | MIME is sniffed from content rather than trusted from the header. Filenames are sanitized. Storage keys are never derived from filenames. |
 | **A06 Vulnerable components** | `uv.lock`, plus `pip-audit --strict` in CI (clean as of this commit). |
 | **A08 Integrity** | Outbox pattern: emails and jobs commit atomically with the business change. Deterministic Qdrant point IDs. |
@@ -84,7 +84,7 @@ The integration suite covers these flows end to end, including real emails read 
 
 ## Deviations from the architecture doc
 
-- **Object storage: RustFS instead of MinIO.** MinIO no longer publishes public images. Any S3 endpoint works through the `S3_*` env vars.
+- **Object storage: RustFS instead of MinIO.** RustFS is the local S3-compatible store. Any S3 endpoint works through the `S3_*` env vars.
 - **Reranker: `BAAI/bge-reranker-base`** (via fastembed/ONNX, CPU) instead of `bge-reranker-v2-m3`. fastembed doesn't ship v2-m3, and the swap avoids pulling in PyTorch. It's configurable with `RERANKER_MODEL`. `GRADE_THRESHOLD` (default 0.0, in logit units) should be tuned on the eval set.
 - **Generation route has a final local fallback (`ollama/qwen3.5:4b`).** This lets the stack run with no cloud keys. Remove it in `config/models.yaml` if that's not wanted. Sonnet 5.5 runs at `effort: low` for latency. Server-side refusal fallback (beta) is enabled on that entry; set `refusal_fallback: false` to disable it.
 - **No LangGraph Postgres checkpointer.** Conversation state is reloaded from `messages` on every turn, which is all the graph needs today.
@@ -95,6 +95,26 @@ The integration suite covers these flows end to end, including real emails read 
 
 ## Operations
 
-- **Re-embed or switch embedding model:** set `EMBEDDING_*`, then run `rag reindex --version 2`. The worker builds `chunks_v2` from Postgres (no re-parsing), atomically flips the `chunks_current` alias, and drops v1.
-- **Job retries:** 3 attempts with exponential backoff. Terminal ingestion failures mark the document `failed` and email the uploader.
-- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. Provider keys never reach the UI.
+- **Re-embed or switch embedding model:** set `EMBEDDING_*`, then run `rag reindex --version 2`. The worker builds `chunks_v2` from Postgres (no re-parsing), atomically flips the `chunks_current` alias, and retains the previous collection for in-flight reads and manual rollback. Reindex serializes against ingestion/upload/delete, rebuilds an incomplete target on retry, and reads Postgres in bounded batches. Stop query traffic during embedding model/dimension changes; the API and worker need the same new embedding settings. Remove retired collections after the rollback window.
+- **Job retries:** 3 attempts with exponential backoff. Terminal ingestion failures mark the document `failed` and email the uploader. Re-uploading that file queues another attempt. Workers hold a dedicated job-row lock during processing, preventing lease expiry from reclaiming a live job. Both successful and terminally failed email jobs have their link payloads scrubbed.
+- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. The UI service receives only `API_URL`, with no backend env file or model volume. Provider keys and database/JWT/storage credentials stay in API/worker services.
+
+
+## Review and validation
+
+See [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md) for the full review, fixed findings, verification evidence,
+and deployment considerations. Security mappings describe implemented controls, not an OWASP
+certification or a penetration-test result. API headers do not automatically harden Streamlit:
+configure HTTPS and appropriate UI headers/query-string log redaction at the production ingress.
+
+The API waits for local model warmup before serving. Ollama orchestration has a 30-second
+request timeout because ingestion can evict the chat model; warmup alone does not prevent that.
+`/readyz` checks Postgres, Qdrant, object storage, and Ollama when local embeddings or
+orchestration require it. This proves service reachability, not model output quality.
+
+Integration tests use `rag_test`, bucket `rag-test`, alias `chunks_test`, and physical collections
+`chunks_test_vN`, separate from the normal `chunks_current` / `chunks_vN` index. Never point
+the destructive integration suite at a production Postgres instance.
+
+Access tokens issued before `sid` was added require refresh or a new sign-in. Existing refresh
+tokens remain usable. `.env` and existing demo data are preserved by the local image update.

@@ -19,7 +19,7 @@ from rag.retrieval.retriever import retrieve
 
 PROMPT_VERSION = "v1"
 _PROMPTS = Path(__file__).parent / "prompts"
-_CITATION = re.compile(r"\[(\d{1,2})\]")
+_CITATION = re.compile(r"\[(\d+)\]")
 INSUFFICIENT = "I couldn't find this in your documents. Try rephrasing, or upload a document that covers this topic."
 
 
@@ -191,6 +191,9 @@ def validate_citations(state: RAGState) -> dict[str, Any]:
         )
         for n in sorted(valid)
     ]
+    if not valid:
+        cleaned = INSUFFICIENT
+    get_stream_writer()({"type": "answer", "text": cleaned})
     get_stream_writer()({"type": "citations", "citations": [c.model_dump() for c in citations]})
     return {"answer": cleaned, "citations": citations, "path": ["validate_citations"]}
 

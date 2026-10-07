@@ -23,13 +23,15 @@ class SecurityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         rid = uuid.uuid4().hex
         request_id_var.set(rid)
+        t0 = time.perf_counter()
         length = request.headers.get("content-length")
+        response: Response
         if length is not None and (not length.isdigit() or int(length) > self._settings.max_request_body_bytes):
-            return JSONResponse(
+            response = JSONResponse(
                 {"error": {"code": "payload_too_large", "message": "Request body too large"}}, status_code=413
             )
-        t0 = time.perf_counter()
-        response = await call_next(request)
+        else:
+            response = await call_next(request)
         h = response.headers
         h["X-Request-ID"] = rid
         h["X-Content-Type-Options"] = "nosniff"

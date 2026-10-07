@@ -9,6 +9,8 @@ import httpx
 import streamlit as st
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+
+
 _TIMEOUT = httpx.Timeout(30.0, read=120.0)
 
 
@@ -17,6 +19,10 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+def _transport_error(exc: httpx.HTTPError) -> ApiError:
+    return ApiError(503, "The service is unavailable. Please try again.")
 
 
 def _headers() -> dict[str, str]:
@@ -58,6 +64,13 @@ def _try_refresh() -> bool:
 
 
 def request(method: str, path: str, **kwargs: Any) -> Any:
+    try:
+        return _request(method, path, **kwargs)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
+
+
+def _request(method: str, path: str, **kwargs: Any) -> Any:
     r = httpx.request(method, f"{API_URL}{path}", headers=_headers(), timeout=_TIMEOUT, **kwargs)
     if r.status_code == 401 and st.session_state.get("refresh_token") and _try_refresh():
         r = httpx.request(method, f"{API_URL}{path}", headers=_headers(), timeout=_TIMEOUT, **kwargs)
@@ -66,7 +79,10 @@ def request(method: str, path: str, **kwargs: Any) -> Any:
 
 
 def public_post(path: str, body: dict[str, Any]) -> Any:
-    r = httpx.post(f"{API_URL}{path}", json=body, timeout=_TIMEOUT)
+    try:
+        r = httpx.post(f"{API_URL}{path}", json=body, timeout=_TIMEOUT)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
     _raise_for(r)
     return r.json() if r.content else None
 
@@ -74,22 +90,30 @@ def public_post(path: str, body: dict[str, Any]) -> Any:
 def me() -> dict[str, Any] | None:
     if "access_token" not in st.session_state:
         return None
-    if "me" not in st.session_state:
-        try:
-            st.session_state["me"] = request("GET", "/v1/me")
-        except ApiError:
+    try:
+        st.session_state["me"] = request("GET", "/v1/me")
+    except ApiError as exc:
+        if exc.status == 401:
             clear_session()
             return None
+        raise
     return st.session_state["me"]  # type: ignore[no-any-return]
 
 
 def can(permission: str) -> bool:
-    info = me()
+    info = st.session_state.get("me")
     return bool(info and permission in info["permissions"])
 
 
 def chat_stream(body: dict[str, Any]) -> Iterator[tuple[str, Any]]:
     """Yields (event, data) pairs from the /v1/chat SSE stream."""
+    try:
+        yield from _chat_stream(body)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
+
+
+def _chat_stream(body: dict[str, Any]) -> Iterator[tuple[str, Any]]:
     for attempt in range(2):
         with httpx.stream("POST", f"{API_URL}/v1/chat", json=body, headers=_headers(), timeout=_TIMEOUT) as r:
             if r.status_code == 401 and attempt == 0 and _try_refresh():

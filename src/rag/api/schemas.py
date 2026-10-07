@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
 
 from rag.auth.rbac import Role
 from rag.domain.models import Citation
@@ -10,7 +10,14 @@ from rag.domain.models import Citation
 
 class In(BaseModel):
     # Reject unknown fields: blocks mass-assignment (OWASP API3) and typos.
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def normalize_text(cls, value: object, info: ValidationInfo) -> object:
+        if isinstance(value, str) and info.field_name not in {"password", "new_password"}:
+            return value.strip()
+        return value
 
 
 class Out(BaseModel):

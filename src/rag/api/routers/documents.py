@@ -16,8 +16,9 @@ from rag.core import ratelimit
 from rag.core.audit import audit
 from rag.core.config import get_settings
 from rag.core.errors import AppError, NotFound, PayloadTooLarge
-from rag.db.models import Chunk, Document
+from rag.db.models import Chunk, Document, Tenant
 from rag.domain.models import RequestContext
+from rag.ingestion.locking import lock_index
 from rag.ingestion.pipeline import storage_key
 from rag.ingestion.sniff import sanitize_filename, sniff_mime
 from rag.worker.queue import enqueue
@@ -58,6 +59,8 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
     mime = sniff_mime(data, title)
     content_hash = hashlib.sha256(data).hexdigest()
 
+    await lock_index(db)
+    await db.execute(select(Tenant.id).where(Tenant.id == ctx.tenant_id).with_for_update())
     live = Document.status != "deleted"
     same = (
         await db.execute(
@@ -65,6 +68,11 @@ async def upload(file: UploadFile, ctx: Writer, db: DB, response: Response) -> U
         )
     ).scalar_one_or_none()
     if same is not None:
+        if same.status == "failed":
+            same.status, same.error = "queued", None
+            job = enqueue(db, "ingest_document", {"document_id": str(same.id), "version": same.version})
+            await db.commit()
+            return UploadAccepted(document_id=same.id, job_id=job.id, status=same.status)
         response.status_code = status.HTTP_200_OK  # idempotent re-upload: no-op
         return UploadAccepted(document_id=same.id, job_id=None, status=same.status)
 
@@ -151,6 +159,7 @@ async def get_document(document_id: uuid.UUID, ctx: Reader, db: DB) -> DocumentO
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(document_id: uuid.UUID, ctx: Deleter, db: DB) -> None:
+    await lock_index(db)
     doc = (
         await db.execute(
             select(Document)

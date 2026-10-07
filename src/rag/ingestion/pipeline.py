@@ -14,6 +14,7 @@ from rag.core.logging import log_extra
 from rag.db.models import Chunk, Document, User
 from rag.email.outbox import queue_email
 from rag.ingestion.chunker import chunk_pages
+from rag.ingestion.locking import lock_index
 from rag.ingestion.parsers import parse
 
 log = logging.getLogger(__name__)
@@ -31,18 +32,30 @@ class StaleJob(Exception):
 async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
     s = get_settings()
     doc_id, version = uuid.UUID(payload["document_id"]), int(payload["version"])
-    doc = await db.get(Document, doc_id)
+    await lock_index(db)
+    doc = (await db.execute(select(Document).where(Document.id == doc_id).with_for_update())).scalar_one_or_none()
     if doc is None or doc.status == "deleted" or doc.version != version:
         log.info("ingest_skipped_stale", extra=log_extra(document_id=str(doc_id)))
         return
     doc.status, doc.error = "processing", None
+    tenant_id, mime = doc.tenant_id, doc.mime_type
     await db.commit()
 
-    raw = await get_storage().get(storage_key(doc.tenant_id, doc.id, version))
-    pages = await asyncio.to_thread(parse, raw, doc.mime_type)
+    # Parsing runs without the index lock or the document row lock held.
+    raw = await get_storage().get(storage_key(tenant_id, doc_id, version))
+    pages = await asyncio.to_thread(parse, raw, mime)
     chunks = await asyncio.to_thread(chunk_pages, pages, s.chunk_tokens, s.chunk_overlap)
     if not chunks:
         raise ValueError("No extractable text (scanned PDFs are not supported yet)")
+
+    await lock_index(db)
+    doc = (
+        await db.execute(
+            select(Document).where(Document.id == doc_id).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if doc is None or doc.status == "deleted" or doc.version != version:
+        return
 
     await db.execute(delete(Chunk).where(Chunk.document_id == doc.id, Chunk.version == version))
     db.add_all(
@@ -87,12 +100,6 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
             ],
         )
 
-    # Re-check: if the doc was deleted or replaced mid-run, don't resurrect it.
-    await db.refresh(doc)
-    if doc.status == "deleted" or doc.version != version:
-        await db.rollback()
-        await store.delete_document(doc.tenant_id, doc.id, keep_version=doc.version)
-        return
     await store.delete_document(doc.tenant_id, doc.id, keep_version=version)
     await db.execute(delete(Chunk).where(Chunk.document_id == doc.id, Chunk.version != version))
     doc.status = "ready"
@@ -101,7 +108,10 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
 
 
 async def on_ingest_failed(db: AsyncSession, payload: dict[str, Any], error: str) -> None:
-    doc = await db.get(Document, uuid.UUID(payload["document_id"]))
+    await lock_index(db)
+    doc = (
+        await db.execute(select(Document).where(Document.id == uuid.UUID(payload["document_id"])).with_for_update())
+    ).scalar_one_or_none()
     if doc is None or doc.version != int(payload["version"]) or doc.status == "deleted":
         return
     doc.status, doc.error = "failed", error[:500]
@@ -118,8 +128,9 @@ async def on_ingest_failed(db: AsyncSession, payload: dict[str, Any], error: str
 
 async def purge_document(db: AsyncSession, payload: dict[str, Any]) -> None:
     """Async cleanup after a delete: vectors (again, idempotent), chunks, raw files."""
+    await lock_index(db)
     doc = (
-        await db.execute(select(Document).where(Document.id == uuid.UUID(payload["document_id"])))
+        await db.execute(select(Document).where(Document.id == uuid.UUID(payload["document_id"])).with_for_update())
     ).scalar_one_or_none()
     if doc is None or doc.status != "deleted":
         return

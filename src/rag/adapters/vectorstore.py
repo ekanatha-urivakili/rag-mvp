@@ -57,10 +57,15 @@ class VectorStore:
         aliases = await self._client.get_aliases()
         return next((a.collection_name for a in aliases.aliases if a.alias_name == self._alias), None)
 
+    def collection_name(self, version: int) -> str:
+        prefix = "chunks" if self._alias == "chunks_current" else self._alias
+        return f"{prefix}_v{version}"
+
     async def ensure_collection(self, version: int = 1) -> None:
-        if await self.current_collection() is not None:
+        current = await self.current_collection()
+        if current is not None and current.startswith(self.collection_name(0).rsplit("_v", 1)[0] + "_v"):
             return
-        name = f"chunks_v{version}"
+        name = self.collection_name(version)
         await self.create_collection(name)
         await self.point_alias_to(name)
 
@@ -84,6 +89,10 @@ class VectorStore:
             ops.append(qm.DeleteAliasOperation(delete_alias=qm.DeleteAlias(alias_name=self._alias)))
         ops.append(qm.CreateAliasOperation(create_alias=qm.CreateAlias(collection_name=name, alias_name=self._alias)))
         await self._client.update_collection_aliases(change_aliases_operations=ops)  # atomic swap
+
+    async def drop_collection_if_exists(self, name: str) -> None:
+        if await self._client.collection_exists(name):
+            await self.drop_collection(name)
 
     async def drop_collection(self, name: str) -> None:
         await self._client.delete_collection(name)
