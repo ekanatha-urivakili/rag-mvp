@@ -25,6 +25,13 @@
 | 12 | RBAC | Tenant-scoped roles (`admin`, `editor`, `viewer`), permission checks as FastAPI dependencies, audit log | §4.7 |
 | 13 | Local Ollama + Anthropic + OpenAI | Per-node model routing with ordered fallbacks; local `qwen3.5:4b` for orchestration steps, Claude for generation, OpenAI as fallback and eval judge | §4.3 |
 
+### Revision 4 — chat history and Next.js UI
+
+| # | Requirement | Design | Section |
+| --- | --- | --- | --- |
+| 14 | Keep a history of chats and continue any of them | `conversations.updated_at` (last activity) drives ordering; keyset-paginated, searchable history; rename and delete; deep links `/c/{id}`; posting to an existing conversation continues it with its last turns as context | §4.10 |
+| 15 | Next.js UI, built with the OWASP Web and API Top 10 in mind | Next.js App Router as a **backend-for-frontend (BFF)**: tokens only in an encrypted HttpOnly cookie, allowlisted server-side proxy to the API, Origin-checked mutations, per-request nonce CSP, no raw HTML rendering | §6 |
+
 ---
 
 ## 1. Scope
@@ -69,7 +76,7 @@
 | Email | `aiosmtplib` + Jinja2 templates; **Mailpit** locally | Outbox via jobs table (§4.8) |
 | Observability | OpenTelemetry + Langfuse, structured JSON logs | Langfuse is an optional compose profile locally (it's heavy) |
 | Evaluation | Retrieval metrics + RAGAS (faithfulness, answer relevancy) | |
-| UI | Streamlit (MVP, multipage) | Talks only to the public API; replaceable by React/TS |
+| UI | Next.js 16 (App Router) + React 19 + TypeScript, Tailwind CSS 4, TanStack Query | Runs as a BFF in front of the API (§6). Streamlit stays for Receipts/Members/Settings until they are ported, then is removed |
 | Containers | **Podman** (rootless) + Compose spec (`compose.yaml`) | Same OCI images in prod |
 
 ---
@@ -80,8 +87,8 @@ Two independent paths share storage: **Ingestion (write path)** and **Query (rea
 
 ```mermaid
 graph LR
-    User((User)) --> UI[Streamlit UI]
-    UI -->|REST + SSE| API[FastAPI<br/>AuthN + RBAC<br/>stateless, N replicas]
+    User((Browser)) -->|same-origin only<br/>session cookie| Web[Next.js BFF<br/>UI + allowlisted proxy]
+    Web -->|REST + SSE<br/>Bearer token| API[FastAPI<br/>AuthN + RBAC<br/>stateless, N replicas]
 
     subgraph Query Path
         API --> Graph[LangGraph RAG Graph]
@@ -316,10 +323,12 @@ jobs             (id, type[ingest_document|send_email|reindex], payload JSONB,
                   locked_at, error, created_at)
 
 -- Chat
-conversations    (id, tenant_id, user_id, title, created_at)
+conversations    (id, tenant_id, user_id, title, created_at, updated_at)
+                  INDEX (tenant_id, user_id, updated_at, id)      -- history list + keyset paging
 messages         (id, conversation_id, role, content, citations JSONB, trace_id,
                   prompt_version, provider, model, fallback_used, tokens_in,
-                  tokens_out, latency_ms, created_at)
+                  tokens_out, latency_ms, debug JSONB, created_at)
+                  INDEX (conversation_id, created_at)             -- latest window + "load earlier"
 feedback         (message_id, user_id, rating SMALLINT, comment, created_at)
 ```
 
@@ -369,8 +378,11 @@ Single collection with `tenant_id` partitioning; the filter is enforced inside t
 | `POST` | `/v1/documents` | `document:write` | Multipart upload → `202 {document_id, job_id}` |
 | `GET` | `/v1/documents`, `/v1/documents/{id}` | `document:read` | List / status, error, chunk count |
 | `DELETE` | `/v1/documents/{id}` | `document:delete` | Remove doc + vectors |
-| `POST` | `/v1/chat` | `chat:use` | `{conversation_id?, message, filters?}` → **SSE stream** |
-| `GET` | `/v1/conversations`, `/v1/conversations/{id}` | `chat:use` (own only) | Messages with citations |
+| `POST` | `/v1/chat` | `chat:use` | `{conversation_id?, message, filters?}` → **SSE stream**. With `conversation_id`, continues that conversation |
+| `GET` | `/v1/conversations?limit&q&before&before_id` | `chat:use` (own only) | History, most recently active first; title search; keyset cursor `(updated_at, id)` |
+| `GET` | `/v1/conversations/{id}?limit&before` | `chat:use` (own only) | Latest `limit` messages (≤ 500) oldest-first + `has_more`; `before` loads earlier ones |
+| `PATCH` | `/v1/conversations/{id}` | `chat:use` (own only) | `{title}` rename |
+| `DELETE` | `/v1/conversations/{id}` | `chat:use` (own only) | Hard delete; messages and feedback cascade |
 | `POST` | `/v1/messages/{id}/feedback` | `chat:use` (own only) | `{rating, comment?}` |
 | `GET` | `/healthz`, `/readyz` | public | Readiness checks Postgres + Qdrant; reports Ollama reachability (degraded, not failed) |
 
@@ -450,7 +462,7 @@ SMTP_HOST=<provider> SMTP_PORT=587   SMTP_TLS=true    SMTP_USER/SMTP_PASSWORD fr
 ```text
 rag-mvp/
 ├── pyproject.toml
-├── compose.yaml                # Podman: api, worker, ui, postgres, qdrant, minio, mailpit (+ langfuse profile)
+├── compose.yaml                # Podman: api, worker, web, ui (legacy), postgres, qdrant, objectstore, mailpit
 ├── Containerfile               # one image; api / worker / ui chosen by command
 ├── .env.example
 ├── config/models.yaml          # model routes + fallbacks
@@ -469,12 +481,60 @@ rag-mvp/
 │   │   ├── embedder.py, vectorstore.py, reranker.py, storage.py, mailer.py
 │   ├── db/                     # SQLAlchemy models, repositories, alembic migrations
 │   └── cli.py                  # admin bootstrap, reindex
-├── ui/                         # Streamlit multipage app
+├── web/                        # Next.js UI + BFF (§6)
+│   ├── Containerfile           # standalone build, non-root, read-only root FS
+│   └── src/
+│       ├── proxy.ts            # per-request CSP nonce, HSTS, token refresh, page auth redirect
+│       ├── app/api/auth/[action]/route.ts   # login/signup/reset/invite/switch/logout → session cookie
+│       ├── app/api/v1/[...path]/route.ts    # allowlisted proxy to the API (JSON, multipart, SSE)
+│       ├── app/(auth)/…        # sign in, verify signup, reset password, accept invite
+│       ├── app/(app)/…         # chat (/ and /c/[id]), documents
+│       ├── components/         # chat thread, history sidebar, markdown, documents
+│       └── lib/                # session (JWE cookie), security (CSRF, allowlist, IP), upstream, SSE parser
+├── ui/                         # Streamlit (legacy: receipts, members, settings until ported)
 ├── evals/
 │   ├── golden.jsonl            # {question, expected_doc_ids, reference_answer}
 │   └── run_eval.py             # --route generation --provider anthropic|openai|ollama
 └── tests/                      # unit, integration (testcontainers on Podman), RBAC matrix tests
 ```
+
+### 4.10 Chat History & Continuation
+
+Every chat is a `conversation` owned by one user in one tenant. The history list and "continue where I left off" are built on Postgres alone; the graph stays stateless.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant W as Next.js BFF
+    participant A as API
+    participant P as Postgres
+    participant G as RAG graph
+
+    B->>W: open /c/{id}
+    W->>A: GET /v1/conversations/{id}?limit=200
+    A->>P: own conversation? (tenant_id, user_id) → latest 200 messages
+    A-->>B: messages (oldest first) + has_more
+    B->>W: POST /api/v1/chat {conversation_id, message}
+    W->>A: POST /v1/chat (Bearer, X-Forwarded-For)
+    A->>P: own conversation? bump updated_at, load last N turns, insert user message (commit)
+    A->>G: question + history
+    G-->>B: SSE status / model / token / answer / citations
+    A->>P: insert assistant message, bump updated_at
+    A-->>B: SSE done {message_id, conversation_id}
+```
+
+| Concern | Decision |
+| --- | --- |
+| Ordering | `updated_at` = last message activity (user turn or assistant answer). Renaming does **not** reorder. Backfilled from `max(messages.created_at)` in migration `0004`. |
+| Paging the list | Keyset cursor `(updated_at, id)` (`before`, `before_id`), never `OFFSET`: stable while chats are continued or deleted between page loads, O(log n) on the `(tenant_id, user_id, updated_at, id)` index. |
+| Search | Case-insensitive title match (`ILIKE`, wildcards escaped), ≤ 100 chars. Full-text search over message bodies is deferred until users ask for it (needs a `tsvector` index on `messages`). |
+| Opening a long chat | Latest `limit` messages (default 200, max 500) plus `has_more`; "Load earlier" pages backwards by `created_at`. Bounded response size (OWASP API4). |
+| Continuing | `POST /v1/chat` with `conversation_id`. The graph receives the last `HISTORY_TURNS` messages; `analyze_query` condenses them into a standalone query, so follow-ups ("and the second one?") retrieve correctly no matter how old the chat is. |
+| Context growth | Only a fixed window of turns is sent to models, so cost and latency don't grow with chat length. A rolling per-conversation summary (one `orchestration` call when the window slides) is the next step if evals show long-chat follow-ups degrading. |
+| Rename / delete | `PATCH {title}`; `DELETE` is a hard delete with `ON DELETE CASCADE` to messages and feedback (chat content is the user's data, not an audit record). |
+| Access | Every query filters by `tenant_id` **and** `user_id`; another user's or tenant's ID is a 404, identical to a missing one. Admins cannot read, rename, delete or continue other users' chats. Covered by the RBAC matrix and `tests/integration/test_conversations.py`. |
+| Workspace switch | Conversations are tenant-scoped; switching workspace shows that workspace's history only. |
+| Interrupted answers | The user turn is committed before streaming. If the stream fails or the user stops it, the assistant turn is missing and the next turn simply continues; history stays consistent. |
 
 ---
 
@@ -499,6 +559,7 @@ rag-mvp/
 - Data egress: document chunks go to the `generation` provider (Anthropic/OpenAI); orchestration steps stay local by default. Documented per route so tenants can be pinned to local-only later.
 - Secrets (provider API keys, JWT secret, SMTP creds) via env / secret manager; never returned to the UI; `.env` git-ignored.
 - No passwords, tokens, prompts or document text in application logs (traces in Langfuse with access control).
+- Browser-facing controls (BFF token custody, CSRF, CSP, XSS-safe rendering) are in §6.3.
 
 ### 5.3 Observability
 
@@ -517,20 +578,64 @@ rag-mvp/
 
 ---
 
-## 6. UI (Streamlit MVP, multipage)
+## 6. UI (Next.js BFF)
 
-The UI calls `/v1/me` and shows/hides actions by permission. **The API is the enforcement point**; hiding is UX only.
+The UI is a Next.js 16 App Router app (`web/`) that also acts as the **backend-for-frontend**. The browser only ever talks to its own origin; the BFF holds the API tokens and calls FastAPI server-to-server. **The API stays the enforcement point** for authN, RBAC, tenancy and rate limits; the BFF adds browser-facing defences and never widens what a user can do.
 
-| Page | Who | Contents |
+```mermaid
+graph LR
+    B((Browser)) -->|"pages, /api/auth/*, /api/v1/*<br/>cookie: __Host-rag_session (JWE)"| P[proxy.ts<br/>CSP nonce · HSTS<br/>token refresh · login redirect]
+    P --> RSC[Server components<br/>GET /v1/me]
+    P --> AUTH[/api/auth/action<br/>zod-validated → set/clear cookie/]
+    P --> PX[/api/v1/...path<br/>allowlist · Origin check<br/>stream JSON, multipart, SSE/]
+    RSC -->|Bearer| API[FastAPI]
+    AUTH -->|tokens never leave the server| API
+    PX -->|Bearer + X-Forwarded-For| API
+```
+
+### 6.1 Pages
+
+The shell loads `/v1/me` server-side and shows/hides actions by permission (UX only).
+
+| Route | Who | Contents |
 | --- | --- | --- |
-| Login / Forgot password / Reset password / Accept invite | public | Token read from the link; set password |
-| Chat | all roles | Streamed answers, status line from SSE `status` events, `[n]` citations with expandable **Sources** panel (doc, page, snippet), 👍/👎 feedback, own conversation list |
-| Documents | `document:read` | Table with live status (`queued → processing → ready / failed`); upload + delete visible only with `document:write` / `document:delete` |
-| Members | admin | Invite by email + role, change role, remove; pending invites |
-| Settings | admin | API keys (create shows secret once, revoke); audit log viewer |
+| `/login` | public | Tabs: sign in, sign up (email verification), reset password |
+| `/verify_signup`, `/reset_password`, `/accept_invite` | public (link token) | Token read server-side from `?token=`, stripped from the address bar on load; set password / workspace |
+| `/` | `chat:use` | New chat: history sidebar + empty thread |
+| `/c/{id}` | `chat:use` (own only) | Past conversation: latest 200 messages, "Load earlier", composer continues it. Streamed answers, status/model line, `[n]` citations with **Sources**, 👍/👎 feedback, Stop button |
+| `/documents` | `document:read` | Live status table (polls only while ingesting); upload/delete with `document:write`/`document:delete` |
+| Receipts, Members, Settings | as before | **Still in Streamlit** (`:8501`) — next migration step, then Streamlit is removed |
 
-- **Debug toggle** (dev only): graph path, rewritten query, rerank scores, provider/model per node and whether a fallback fired.
-- Model/temperature selection is not exposed to end users; it is server config.
+History sidebar: "New chat", debounced title search, groups (Today / Yesterday / Previous 7 days / Older), keyset "Load more", inline rename, two-step delete. The first answer in a new chat moves the URL to `/c/{id}` without re-fetching.
+
+### 6.2 Session and token handling
+
+- **Login** (`POST /api/auth/login`): the BFF calls `/v1/auth/login`, then stores `{access, refresh, access_exp}` in one cookie encrypted with **JWE `dir` + A256GCM** (key = SHA-256 of `SESSION_SECRET`). Response body is `{ok: true}` — the browser never receives a token, so XSS cannot exfiltrate one.
+- **Cookie**: `HttpOnly`, `SameSite=Strict`, `Path=/`, 14-day max-age; `Secure` + `__Host-` prefix whenever `WEB_ORIGIN` is https (prod requires it).
+- **Refresh**: `proxy.ts` refreshes when the access token has < 60 s left, rewrites the cookie on both the forwarded request and the response, so server components and route handlers see the new token. Refresh tokens rotate and **reuse revokes the whole family** (§4.7), so concurrent requests holding the same expiring cookie share one in-flight refresh, and the result is reused for 60 s. That cache is per process: run web replicas with **sticky sessions** (or move the cache to Redis) before scaling out. API unreachable ≠ invalid: only a 401 from `/v1/auth/refresh` clears the cookie.
+- **Logout / workspace switch**: revoke the refresh family at the API, then clear/replace the cookie. Switching workspace revokes the old workspace's session.
+
+### 6.3 OWASP mapping (Web 2021 / API 2023)
+
+| Risk | Control in `web/` |
+| --- | --- |
+| **A01 / API1, API5** Broken access control | No authorization logic in the UI; the API checks tenant, owner and role on every call. The BFF proxies only an explicit `(method, path)` allowlist with UUID-shaped IDs (`lib/security.ts`); admin routes are not reachable until their pages exist. Path segments are restricted to `[A-Za-z0-9-]` (no traversal / encoded slashes). |
+| **A01** CSRF | `SameSite=Strict` cookie **and** every non-GET BFF request must carry `Origin == WEB_ORIGIN` (fallback `Sec-Fetch-Site: same-origin`); otherwise 403. GETs are side-effect free. |
+| **A02** Cryptographic failures | Tokens only inside an AES-256-GCM JWE cookie; HSTS (2 years) and `upgrade-insecure-requests` when https; `Secure` cookies; prod refuses a non-https `WEB_ORIGIN`. |
+| **A03** Injection / XSS | React escaping everywhere; ESLint bans `dangerouslySetInnerHTML`. Model output is rendered with `react-markdown` with **raw HTML skipped**, images disallowed, `javascript:` URLs stripped, links `rel="noopener noreferrer nofollow"`. Per-request **nonce CSP** with `strict-dynamic`, `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`, `img-src 'self' data: blob:` (blocks prompt-injection exfiltration through remote images), `connect-src 'self'`. |
+| **A04** Insecure design | BFF pattern instead of tokens in `localStorage`; strict zod schemas (`strictObject`, unknown keys rejected) on every auth input; validation errors never echo values. |
+| **A05 / API8** Misconfiguration | `poweredByHeader: false`, no production source maps, `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` (link tokens never leak via Referer), COOP/CORP, restrictive `Permissions-Policy`. Container: non-root, read-only root FS, `cap_drop: ALL`, `no-new-privileges`, bound to `127.0.0.1`. Error pages show no details. |
+| **A06** Vulnerable components | `package-lock.json`; `npm audit --omit=dev --audit-level=high` in CI. |
+| **A07 / API2** Auth failures | Rotating refresh tokens with reuse detection preserved (single-flight refresh); logout revokes server-side; 401 anywhere sends the user to sign-in and drops cached data. |
+| **A08** Integrity | Lockfile installs (`npm ci --ignore-scripts` in the image); no third-party scripts or CDNs. |
+| **A09** Logging | BFF logs no bodies, tokens or cookies; the API's request ID is passed through (`X-Request-ID`). |
+| **A10 / API7** SSRF | The upstream origin is fixed server config (`API_URL`); user input only selects an allowlisted path, never a host. |
+| **API4** Resource consumption | Auth bodies capped at 16 KB (counted bytes, works for chunked bodies), proxy bodies at 30 MB, query strings at 2 KB; 30 s upstream timeout (chat: 5 min, cancelled when the browser disconnects); API rate limits keyed on the real client IP (`X-Forwarded-For`, trusted by uvicorn only from the BFF's address). |
+
+### 6.4 Not exposed to end users
+
+- Model/temperature selection (server config).
+- Debug details (graph path, rewritten query, scores) stay in the dev-only API `debug` event and the legacy UI; the Next.js UI doesn't render them.
 
 ---
 
@@ -562,7 +667,8 @@ podman compose exec api rag admin create --email you@example.com --tenant demo
 | --- | --- | --- | --- |
 | `api` | app image | 8000 | `uvicorn rag.api.main:app` |
 | `worker` | app image | — | `python -m rag.worker`; reranker model cached in a volume |
-| `ui` | app image | 8501 | Streamlit |
+| `web` | `web/Containerfile` | 3000 | Next.js UI + BFF; only service the browser uses; reaches `api` over the private `bff` network (fixed IP `172.31.250.2`, the only address the API trusts for `X-Forwarded-For`) |
+| `ui` | app image | 8501 | Legacy Streamlit (receipts, members, settings) until ported |
 | `postgres` | `postgres:16` | 5432 | named volume, healthcheck |
 | `qdrant` | `qdrant/qdrant` | 6333, 6334 | named volume |
 | `minio` | `minio/minio` | 9000, 9001 | named volume |
@@ -581,6 +687,8 @@ Podman notes:
 
 Same OCI image (built with `podman build`) deployed to a PaaS, or a single VM running **Podman Quadlet** (systemd-managed containers). Managed Postgres; Qdrant Cloud or self-hosted with snapshots; S3; real SMTP provider instead of Mailpit (env change only). Ollama on a GPU host if orchestration stays local in prod — otherwise point the `orchestration` route at Claude Haiku via config. Migrations run as a release step.
 
+The `web` image runs behind the HTTPS ingress; the API is **not** exposed publicly, only to `web` (and service accounts via a separate, API-key-only route if needed). Prod env: `ENV=prod`, `WEB_ORIGIN=https://…` (enables `__Host-`/`Secure` cookies, HSTS, `upgrade-insecure-requests`), `PUBLIC_UI_URL` = same origin, `TRUSTED_PROXY_HOPS` = number of proxies that append `X-Forwarded-For` in front of `web` (ingress = 2), and the API's `FORWARDED_ALLOW_IPS` = the web replicas' addresses.
+
 ### 7.3 Scale path (only when a metric demands it)
 
 | Component | MVP | Evolve when | To |
@@ -593,7 +701,7 @@ Same OCI image (built with `podman build`) deployed to a PaaS, or a single VM ru
 | Reranker | Local CPU | Latency under load | GPU instance or hosted rerank API |
 | Authz | 3 fixed roles | Custom roles / per-doc ACLs | DB-defined roles; doc ACL payload filter in Qdrant |
 | Auth | Email + password | Enterprise customers | OIDC/SSO (keep RBAC unchanged) |
-| UI | Streamlit | Product polish | React + TypeScript client on the same API |
+| Web BFF | 1 replica | Concurrency / HA | More replicas with sticky sessions (refresh single-flight is per process), or a shared refresh lock in Redis |
 | Agents | Corrective RAG graph | New use cases | Additional LangGraph subgraphs (SQL, web, tools) |
 
 ---
@@ -642,6 +750,13 @@ Same OCI image (built with `podman build`) deployed to a PaaS, or a single VM ru
 - Permission-aware rendering via `/v1/me`; debug toggle.
 - **Exit:** end-to-end demo with admin, editor, and viewer accounts.
 
+### Phase 5b — Chat history + Next.js UI (Revision 4)
+
+- **Done in this step:** migration `0004` (`conversations.updated_at`, indexes); history list ordering, keyset paging, title search, rename, delete, bounded message window with "load earlier"; tests for ordering, paging, search, rename/delete cascade, continuation context, and owner-only access.
+- **Done in this step:** `web/` BFF (session cookie, refresh single-flight, allowlisted proxy, CSRF, CSP nonce, security headers); auth flows; chat with history sidebar and continuation; documents. CI job: lint, typecheck, format, unit tests, build, `npm audit`.
+- **Next:** port Receipts, Members (invites, roles), Settings (API keys, audit log) — extend the BFF allowlist per page; Playwright end-to-end tests (login → chat → reopen → continue; CSRF and CSP assertions); remove Streamlit and the `ui` service; rolling conversation summary if long-chat evals require it.
+- **Exit:** every Streamlit page has a Next.js equivalent; e2e suite green in CI; Streamlit removed.
+
 ### Phase 6 — Hardening & Launch (Week 7)
 
 - Rate limits (chat, upload, login, reset); upload limits.
@@ -670,4 +785,6 @@ Same OCI image (built with `podman build`) deployed to a PaaS, or a single VM ru
 | Queue | Postgres SKIP LOCKED | Celery/Redis | No extra infra at MVP volume |
 | Containers | Podman (rootless) + Compose spec | Docker Desktop | Daemonless/rootless, no licensing concerns; Compose spec keeps it portable; Quadlet for single-VM prod |
 | Streaming | SSE | WebSockets | One-way stream is enough; simpler infra |
-| UI | Streamlit | Next.js (for now) | Speed to MVP; API-first so the UI is replaceable |
+| UI | Next.js App Router as a BFF | Streamlit; SPA holding tokens in `localStorage` | Product-grade UI; tokens never reachable from JS; one same-origin surface for CSP/CSRF. Streamlit got the MVP out; the API-first design made the swap a UI-only change |
+| Chat history paging | Keyset `(updated_at, id)` | `OFFSET` | Stable while chats move and are deleted; constant cost per page |
+| Long-chat context | Fixed window of last N turns + query condensation | Whole transcript; rolling summary now | Bounded cost/latency; add a rolling summary only if evals show degradation |

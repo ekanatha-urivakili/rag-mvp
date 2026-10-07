@@ -55,6 +55,27 @@ jobs:
         shell: bash
         run: uvx --python 3.12 pip-audit --strict --disable-pip --no-deps -r <(uv export --no-dev --no-hashes --frozen --no-emit-project)
 
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+      - name: Dependency vulnerability audit (OWASP A06)
+        run: npm audit --omit=dev --audit-level=high
+
   # Retrieval/generation regression gate. Needs a seeded eval tenant + provider keys as secrets.
   eval:
     if: github.event_name == 'pull_request' && vars.EVAL_ENABLED == 'true'

@@ -3,14 +3,22 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 
-from rag.api.schemas import ChatIn, ConversationDetailOut, ConversationOut, FeedbackIn, MessageOut
+from rag.api.schemas import (
+    ChatIn,
+    ConversationDetailOut,
+    ConversationOut,
+    ConversationPatchIn,
+    FeedbackIn,
+    MessageOut,
+)
 from rag.auth.deps import DB, require
 from rag.auth.rbac import Permission
 from rag.core import ratelimit
@@ -55,7 +63,9 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
     assert ctx.user_id is not None
 
     if body.conversation_id:
+        # Continuing an existing chat: it moves to the top of the history list.
         conv = await _own_conversation(db, ctx, body.conversation_id)
+        await db.execute(update(Conversation).where(Conversation.id == conv.id).values(updated_at=func.now()))
     else:
         conv = Conversation(
             id=uuid.uuid4(), tenant_id=ctx.tenant_id, user_id=ctx.user_id, title=body.message[:80].replace("\n", " ")
@@ -151,6 +161,7 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
             debug=debug,
         )
         db.add(msg)
+        await db.execute(update(Conversation).where(Conversation.id == conversation_id).values(updated_at=func.now()))
         await db.commit()
     log.info("chat_done", extra=log_extra(trace_id=trace_id, path=debug["path"], latency_ms=msg.latency_ms))
     if get_settings().env == "dev":
@@ -158,31 +169,72 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
     yield _sse("done", {"message_id": str(msg.id), "conversation_id": str(conversation_id)})
 
 
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @router.get("/v1/conversations", response_model=list[ConversationOut])
 async def list_conversations(
-    ctx: ChatUser, db: DB, limit: Annotated[int, Query(ge=1, le=100)] = 50
+    ctx: ChatUser,
+    db: DB,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    q: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+    before: Annotated[datetime | None, Query(description="Keyset cursor: updated_at of the last item seen")] = None,
+    before_id: Annotated[uuid.UUID | None, Query(description="Keyset cursor tie-breaker: id of the last item")] = None,
 ) -> list[Conversation]:
-    q = (
-        select(Conversation)
-        .where(Conversation.tenant_id == ctx.tenant_id, Conversation.user_id == ctx.user_id)
-        .order_by(Conversation.created_at.desc())
-        .limit(limit)
-    )
-    return list((await db.execute(q)).scalars())
+    """Own conversations, most recently active first. Page with the last item's (updated_at, id)."""
+    stmt = select(Conversation).where(Conversation.tenant_id == ctx.tenant_id, Conversation.user_id == ctx.user_id)
+    if q:
+        stmt = stmt.where(Conversation.title.ilike(f"%{_escape_like(q)}%", escape="\\"))
+    if before is not None:
+        if before_id is not None:
+            stmt = stmt.where(tuple_(Conversation.updated_at, Conversation.id) < tuple_(before, before_id))
+        else:
+            stmt = stmt.where(Conversation.updated_at < before)
+    stmt = stmt.order_by(Conversation.updated_at.desc(), Conversation.id.desc()).limit(limit)
+    return list((await db.execute(stmt)).scalars())
 
 
 @router.get("/v1/conversations/{conversation_id}", response_model=ConversationDetailOut)
-async def get_conversation(conversation_id: uuid.UUID, ctx: ChatUser, db: DB) -> ConversationDetailOut:
+async def get_conversation(
+    conversation_id: uuid.UUID,
+    ctx: ChatUser,
+    db: DB,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    before: Annotated[datetime | None, Query(description="Only messages older than this (load earlier)")] = None,
+) -> ConversationDetailOut:
     conv = await _own_conversation(db, ctx, conversation_id)
-    msgs = (
-        await db.execute(select(Message).where(Message.conversation_id == conv.id).order_by(Message.created_at))
-    ).scalars()
+    stmt = select(Message).where(Message.conversation_id == conv.id)
+    if before is not None:
+        stmt = stmt.where(Message.created_at < before)
+    newest_first = list((await db.execute(stmt.order_by(Message.created_at.desc()).limit(limit + 1))).scalars())
     return ConversationDetailOut(
         id=conv.id,
         title=conv.title,
         created_at=conv.created_at,
-        messages=[MessageOut.model_validate(m) for m in msgs],
+        updated_at=conv.updated_at,
+        messages=[MessageOut.model_validate(m) for m in reversed(newest_first[:limit])],
+        has_more=len(newest_first) > limit,
     )
+
+
+@router.patch("/v1/conversations/{conversation_id}", response_model=ConversationOut)
+async def rename_conversation(
+    conversation_id: uuid.UUID, body: ConversationPatchIn, ctx: ChatUser, db: DB
+) -> Conversation:
+    conv = await _own_conversation(db, ctx, conversation_id)
+    conv.title = body.title.replace("\n", " ")
+    await db.commit()
+    await db.refresh(conv)
+    return conv
+
+
+@router.delete("/v1/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(conversation_id: uuid.UUID, ctx: ChatUser, db: DB) -> None:
+    # Hard delete: messages and feedback cascade. Chat content is user data, not an audit record.
+    conv = await _own_conversation(db, ctx, conversation_id)
+    await db.delete(conv)
+    await db.commit()
 
 
 @router.post("/v1/messages/{message_id}/feedback", status_code=status.HTTP_204_NO_CONTENT)
