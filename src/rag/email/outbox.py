@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.worker.queue import enqueue
 
-Template = Literal["invite", "password_reset", "ingestion_failed"]
+Template = Literal["invite", "password_reset", "ingestion_failed", "signup"]
 
 
 def queue_email(db: AsyncSession, *, template: Template, to: str, context: dict[str, Any]) -> None:

@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     refresh_token_ttl_s: int = 14 * 24 * 3600
     invite_ttl_s: int = 72 * 3600
     password_reset_ttl_s: int = 30 * 60
+    signup_ttl_s: int = Field(default=30 * 60, gt=0)
+    signup_enabled: bool = True
+    rl_signup_per_ip: int = Field(default=5, gt=0)
+    rl_signup_window_s: int = Field(default=3600, gt=0)
     password_min_length: int = 12
     password_max_length: int = 128
     refresh_cookie_name: str = "rag_refresh"
@@ -48,6 +52,8 @@ class Settings(BaseSettings):
     # --- Uploads ---
     max_upload_bytes: int = 25 * 1024 * 1024
     max_docx_uncompressed_bytes: int = 200 * 1024 * 1024
+    max_image_pixels: int = 40_000_000  # decompression-bomb guard for uploaded images
+    max_ocr_pages: int = 20
 
     # --- Storage ---
     s3_endpoint_url: str = "http://localhost:9000"
@@ -83,6 +89,8 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_generation_model: str = "gpt-5-mini"
     openai_judge_model: str = "gpt-5-mini"
+    ollama_vision_model: str = "qwen3-vl:latest"
+    openai_vision_model: str = "gpt-5-mini"
     generation_max_tokens: int = 2048
     history_turns: int = 6
     max_question_chars: int = 4000

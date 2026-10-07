@@ -16,6 +16,14 @@ from rag.adapters.llm.base import (
 )
 
 
+def _content(m: Message) -> str | list[dict[str, Any]]:
+    if not m.images:
+        return m.content
+    parts: list[dict[str, Any]] = [{"type": "text", "text": m.content}]
+    parts += [{"type": "image_url", "image_url": {"url": f"data:{i.media_type};base64,{i.b64()}"}} for i in m.images]
+    return parts
+
+
 class OpenAILLM:
     provider = "openai"
 
@@ -26,7 +34,7 @@ class OpenAILLM:
 
     @staticmethod
     def _msgs(messages: list[Message]) -> list[ChatCompletionMessageParam]:
-        return [{"role": m.role, "content": m.content} for m in messages]  # type: ignore[misc]
+        return [{"role": m.role, "content": _content(m)} for m in messages]  # type: ignore[misc]
 
     async def complete(
         self,

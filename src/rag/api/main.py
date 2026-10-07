@@ -12,7 +12,7 @@ from starlette.middleware.body_limit import RequestBodyLimitMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rag.api.middleware import SecurityMiddleware
-from rag.api.routers import apikeys, audit, auth, chat, documents, health, me, members
+from rag.api.routers import apikeys, audit, auth, chat, documents, health, me, members, receipts
 from rag.core.config import get_settings
 from rag.core.errors import AppError, RateLimited
 from rag.core.logging import configure_logging, request_id_var
@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
         apikeys.router,
         audit.router,
         documents.router,
+        receipts.router,
         chat.router,
     ):
         app.include_router(r)

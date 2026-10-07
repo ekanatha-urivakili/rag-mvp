@@ -2,7 +2,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Request, Response, status
 
-from rag.api.schemas import AcceptInviteIn, ForgotIn, LoginIn, RefreshIn, ResetIn, SwitchTenantIn, TokenOut
+from rag.api.schemas import (
+    AcceptInviteIn,
+    ForgotIn,
+    LoginIn,
+    RefreshIn,
+    ResetIn,
+    SignupIn,
+    SwitchTenantIn,
+    TokenOut,
+    VerifySignupIn,
+)
 from rag.auth import service
 from rag.auth.deps import DB, UserCtx, client_ip
 from rag.core.config import get_settings
@@ -32,6 +42,20 @@ def _set_refresh_cookie(response: Response, pair: service.TokenPair) -> TokenOut
 
 
 RefreshCookie = Annotated[str | None, Cookie(alias="rag_refresh")]
+
+
+@router.post("/signup", status_code=status.HTTP_202_ACCEPTED)
+async def signup(body: SignupIn, request: Request, db: DB) -> dict[str, str]:
+    await service.signup(db, email=body.email, ip=client_ip(request))
+    return {"status": "If you can register with this email, a verification link is on its way."}
+
+
+@router.post("/signup/verify", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
+async def verify_signup(body: VerifySignupIn, request: Request, response: Response, db: DB) -> TokenOut:
+    pair = await service.verify_signup(
+        db, token=body.token, password=body.password, workspace_name=body.workspace_name, ip=client_ip(request)
+    )
+    return _set_refresh_cookie(response, pair)
 
 
 @router.post("/login", response_model=TokenOut)

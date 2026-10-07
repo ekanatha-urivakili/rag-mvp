@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ from rag.core.logging import log_extra
 
 log = logging.getLogger(__name__)
 _ENV = re.compile(r"\$\{([A-Z0-9_]+)\}")
+OnAttempt = Callable[[RouteEntry], Awaitable[None]]
 
 
 def _expand(value: Any, settings: Settings) -> Any:
@@ -39,9 +40,12 @@ class FallbackLLM:
     """Tries each route entry in order; falls through on timeout, connection/API errors, refusals,
     or structured output that fails validation twice."""
 
-    def __init__(self, purpose: str, entries: list[tuple[RouteEntry, LLM]]) -> None:
+    def __init__(
+        self, purpose: str, entries: list[tuple[RouteEntry, LLM]], on_attempt: OnAttempt | None = None
+    ) -> None:
         self.purpose = purpose
         self._entries = entries
+        self._on_attempt = on_attempt
         self.provider, self.model = entries[0][1].provider, entries[0][1].model
 
     def _fell_back(self, entry: RouteEntry, err: BaseException) -> None:
@@ -59,6 +63,8 @@ class FallbackLLM:
         temperature: float = 0.0,
     ) -> Completion:
         for i, (entry, llm) in enumerate(self._entries):
+            if self._on_attempt:
+                await self._on_attempt(entry)
             attempts = 2 if schema is not None else 1
             for _ in range(attempts):
                 try:
@@ -79,6 +85,8 @@ class FallbackLLM:
 
     async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
         for i, (entry, llm) in enumerate(self._entries):
+            if self._on_attempt:
+                await self._on_attempt(entry)
             it = llm.stream(messages, max_tokens=max_tokens).__aiter__()
             try:
                 # Fallback is only possible before the first token reaches the client.
@@ -146,13 +154,13 @@ class ModelRouter:
             e.model: e.options.get("keep_alive", "30m")
             for es in self._routes.values()
             for e in es
-            if e.provider == "ollama"
+            if e.provider == "ollama" and e.options.get("warm", True)
         }
         client: ollama.AsyncClient = self._client("ollama")
         for model, keep_alive in models.items():
             await client.generate(model=model, prompt="", keep_alive=keep_alive)  # empty prompt = load only
 
-    def for_purpose(self, purpose: str) -> FallbackLLM:
+    def for_purpose(self, purpose: str, on_attempt: OnAttempt | None = None) -> FallbackLLM:
         entries: list[tuple[RouteEntry, LLM]] = []
         only = os.environ.get("RAG_PIN_PROVIDER")  # eval runs compare providers one at a time
         for e in self._routes[purpose]:
@@ -162,7 +170,7 @@ class ModelRouter:
             entries.append((e, cls(self._client(e.provider), e.model, e.options)))
         if not entries:
             raise LLMUnavailable(f"No configured provider for route '{purpose}'")
-        return FallbackLLM(purpose, entries)
+        return FallbackLLM(purpose, entries, on_attempt)
 
 
 @lru_cache

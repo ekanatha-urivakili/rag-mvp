@@ -11,8 +11,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
-from rag.adapters.llm.base import Message, Usage
-from rag.adapters.llm.router import get_router
+from rag.adapters.llm.base import Message, RouteEntry, Usage
+from rag.adapters.llm.router import FallbackLLM, get_router
 from rag.core.config import get_settings
 from rag.domain.models import ChatTurn, Citation, ModelUsage, ScoredChunk
 from rag.retrieval.retriever import retrieve
@@ -87,12 +87,22 @@ def build_context(chunks: list[ScoredChunk]) -> str:
     return "\n\n".join(blocks)
 
 
+def _llm(purpose: str) -> FallbackLLM:
+    """Route for `purpose` that tells the client which model it is trying (fallbacks included)."""
+    write = get_stream_writer()
+
+    async def announce(entry: RouteEntry) -> None:
+        write({"type": "model", "purpose": purpose, "provider": entry.provider, "model": entry.model})
+
+    return get_router().for_purpose(purpose, on_attempt=announce)
+
+
 # --- Nodes -----------------------------------------------------------------------
 
 
 async def analyze_query(state: RAGState) -> dict[str, Any]:
     get_stream_writer()({"type": "status", "step": "analyzing"})
-    llm = get_router().for_purpose("orchestration")
+    llm = _llm("orchestration")
     user = f"Conversation:\n{_history_block(state.get('history', []))}\n\nLatest message:\n{state['question']}"
     res = await llm.complete(
         [Message("system", prompt("analyze_query")), Message("user", user)], schema=QueryAnalysis, max_tokens=300
@@ -114,7 +124,7 @@ async def _stream_answer(purpose: str, messages: list[Message], max_tokens: int)
     fallback = False
     usage: Usage | None = None
     t0 = time.perf_counter()
-    async for ev in get_router().for_purpose(purpose).stream(messages, max_tokens=max_tokens):
+    async for ev in _llm(purpose).stream(messages, max_tokens=max_tokens):
         provider, model, fallback = ev.provider or provider, ev.model or model, ev.fallback_used or fallback
         if ev.text:
             parts.append(ev.text)
@@ -150,7 +160,7 @@ def grade(state: RAGState) -> Literal["generate", "rewrite_query", "insufficient
 
 async def rewrite_query(state: RAGState) -> dict[str, Any]:
     get_stream_writer()({"type": "status", "step": "rewriting"})
-    llm = get_router().for_purpose("orchestration")
+    llm = _llm("orchestration")
     res = await llm.complete(
         [Message("system", prompt("rewrite_query")), Message("user", state["standalone_query"])],
         schema=RewrittenQuery,

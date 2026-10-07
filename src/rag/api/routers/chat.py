@@ -109,6 +109,8 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
             kind = chunk.get("type")
             if kind == "status":
                 yield _sse("status", {"step": chunk["step"]})
+            elif kind == "model":
+                yield _sse("model", {k: chunk[k] for k in ("purpose", "provider", "model")})
             elif kind == "token":
                 yield _sse("token", {"text": chunk["text"]})
             elif kind == "answer":

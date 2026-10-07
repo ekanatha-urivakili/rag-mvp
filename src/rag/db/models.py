@@ -1,18 +1,22 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any, ClassVar
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
     text,
@@ -78,7 +82,7 @@ class EmailToken(Base):
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = _created()
-    __table_args__ = (CheckConstraint("type in ('invite','password_reset')", name="ck_email_token_type"),)
+    __table_args__ = (CheckConstraint("type in ('invite','password_reset','signup')", name="ck_email_token_type"),)
 
 
 class RefreshToken(Base):
@@ -138,6 +142,8 @@ class Document(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(16), default="queued")
     error: Mapped[str | None] = mapped_column(Text)
+    # Live ingestion step for the UI, e.g. {"step": "extracting", "provider": "ollama", "model": "qwen3-vl"}.
+    progress: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -167,6 +173,40 @@ class Chunk(Base):
     page_end: Mapped[int | None] = mapped_column(Integer)
     token_count: Mapped[int] = mapped_column(Integer)
     __table_args__ = (UniqueConstraint("document_id", "version", "chunk_index", name="uq_chunk_position"),)
+
+
+_Money = Numeric(14, 2)
+
+
+class Receipt(Base):
+    """Structured fields extracted from a receipt document (one row per document, for its current version)."""
+
+    __tablename__ = "receipts"
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer)
+    merchant_name: Mapped[str | None] = mapped_column(String(200))
+    merchant_address: Mapped[str | None] = mapped_column(String(500))
+    merchant_phone: Mapped[str | None] = mapped_column(String(50))
+    purchased_on: Mapped[date | None] = mapped_column(Date)
+    purchased_time: Mapped[time | None] = mapped_column(Time)
+    currency: Mapped[str | None] = mapped_column(String(3))
+    items: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    discounts: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    item_count: Mapped[int | None] = mapped_column(Integer)
+    subtotal: Mapped[Decimal | None] = mapped_column(_Money)
+    discount_total: Mapped[Decimal | None] = mapped_column(_Money)
+    tax: Mapped[Decimal | None] = mapped_column(_Money)
+    tip: Mapped[Decimal | None] = mapped_column(_Money)
+    total: Mapped[Decimal | None] = mapped_column(_Money)
+    payment_method: Mapped[str | None] = mapped_column(String(16))
+    card_brand: Mapped[str | None] = mapped_column(String(32))
+    card_last4: Mapped[str | None] = mapped_column(String(4))  # never more than the last 4 digits
+    warnings: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    provider: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = _created()
+    __table_args__ = (Index("ix_receipts_tenant_purchased", "tenant_id", "purchased_on"),)
 
 
 # --- Background work ---------------------------------------------------------
