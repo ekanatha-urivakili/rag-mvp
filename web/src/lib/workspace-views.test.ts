@@ -61,6 +61,16 @@ describe("workspace views", () => {
     expect(html).not.toContain("<img");
     expect(html).toContain("&lt;img");
   });
+  it("offers revocation for each pending invitation", () => {
+    const client = new QueryClient();
+    client.setQueryData(["members", "workspace", 0], []);
+    client.setQueryData(
+      ["invitations", "workspace", 0],
+      [{ id: "inv", email: "pending@example.com", role: "editor", expires_at: "2026-10-10", created_at: "2026-10-07" }],
+    );
+    const html = render(MembersView, client);
+    expect(html).toContain('aria-label="Revoke invitation for pending@example.com"');
+  });
   it("renders listed keys as prefixes without retrieving their secrets", () => {
     const client = new QueryClient();
     client.setQueryData(

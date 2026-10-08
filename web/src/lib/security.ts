@@ -60,6 +60,7 @@ const ALLOWED: ReadonlyArray<readonly [string, RegExp]> = [
   ["DELETE", new RegExp(`^members/${UUID}$`)],
   ["GET", /^invitations$/],
   ["POST", /^invitations$/],
+  ["DELETE", new RegExp(`^invitations/${UUID}$`)],
   ["GET", /^api-keys$/],
   ["POST", /^api-keys$/],
   ["DELETE", new RegExp(`^api-keys/${UUID}$`)],

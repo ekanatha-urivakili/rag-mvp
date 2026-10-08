@@ -103,7 +103,7 @@ def accept_invite() -> None:
     if not token:
         st.warning("Open this page from the link in your invitation email.")
         return
-    st.caption("New here? Choose a password. Already have an account? Leave it empty.")
+    st.caption("New here? Choose a password. Already have an account? Enter your current password.")
     with st.form("accept"):
         pw = st.text_input("Password (min 12 characters)", type="password", autocomplete="new-password")
         if st.form_submit_button("Accept invitation", type="primary"):

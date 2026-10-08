@@ -16,6 +16,17 @@ const OLDER_PAGE = 50;
 type UiMessage = Message & { pending?: boolean; error?: string; local?: boolean };
 type Progress = { step: string; model?: string; provider?: string };
 
+const STEP_LABEL: Record<string, string> = {
+  starting: "Starting",
+  analyzing: "Understanding your question",
+  retrieving: "Searching your documents",
+  rewriting: "Refining the search",
+  generating: "Writing the answer",
+  responding: "Replying",
+};
+/** Distance from the bottom (px) within which the thread keeps following a streaming answer. */
+const STICK_PX = 80;
+
 export function ChatThread({ conversationId }: { conversationId: string | null }) {
   const query = useQuery({
     queryKey: ["conversation", conversationId],
@@ -49,6 +60,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
   const [progress, setProgress] = useState<Progress | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
   const qc = useQueryClient();
   const router = useRouter();
   const streaming = progress !== null;
@@ -56,8 +68,14 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
   useEffect(() => () => abortRef.current?.abort(), []);
   useEffect(() => {
+    stickRef.current = true;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [lastId]);
+  // Follow the streamed answer unless the reader has scrolled up to read something else.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && streaming && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [messages, streaming]);
 
   async function loadOlder() {
     const oldest = messages[0];
@@ -178,7 +196,14 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
   return (
     <div className="flex h-full flex-col">
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+        }}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
         <div className="mx-auto max-w-3xl space-y-6 px-4 py-6">
           {hasMore && (
             <div className="text-center">
@@ -230,7 +255,8 @@ function AssistantMessage({ m, progress }: { m: UiMessage; progress: Progress | 
     <div className="space-y-2">
       {progress && (
         <p className="animate-pulse text-xs text-zinc-500" aria-live="polite">
-          {progress.step}…{progress.model ? ` using ${progress.model} (${progress.provider})` : ""}
+          {STEP_LABEL[progress.step] ?? progress.step}…
+          {progress.model ? ` using ${progress.model} (${progress.provider})` : ""}
         </p>
       )}
       {m.content && <Markdown>{m.content}</Markdown>}
@@ -243,6 +269,7 @@ function AssistantMessage({ m, progress }: { m: UiMessage; progress: Progress | 
               {m.model} · {m.provider}
             </span>
           )}
+          {m.content && <CopyButton text={m.content} />}
           {!m.local && <FeedbackButtons messageId={m.id} />}
         </div>
       )}
@@ -268,6 +295,28 @@ function Sources({ citations }: { citations: Citation[] }) {
         ))}
       </ol>
     </details>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    setTimeout(() => setState("idle"), 2000);
+  }
+  return (
+    <button
+      onClick={() => void copy()}
+      aria-label="Copy answer"
+      className="rounded px-1.5 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+    >
+      <span aria-live="polite">{state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy"}</span>
+    </button>
   );
 }
 
@@ -342,6 +391,7 @@ function Composer({
         </label>
         <textarea
           id="composer"
+          autoFocus
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}

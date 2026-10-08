@@ -166,7 +166,7 @@ function HistoryItem({ c, active, onNavigate }: { c: Conversation; active: boole
         {c.title}
       </Link>
       <div
-        className={`absolute top-1 right-1 flex gap-0.5 text-xs ${mode === "confirm-delete" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100"}`}
+        className={`absolute top-1 right-1 flex gap-0.5 text-xs ${mode === "confirm-delete" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"}`}
       >
         {mode === "confirm-delete" ? (
           <>

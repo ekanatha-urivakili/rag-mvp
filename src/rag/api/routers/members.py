@@ -55,6 +55,11 @@ async def invite(body: InviteIn, ctx: Admin, db: DB) -> dict[str, str]:
     return {"status": "invited"}
 
 
+@router.delete("/v1/invitations/{invitation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_invitation(invitation_id: uuid.UUID, ctx: Admin, db: DB) -> None:
+    await service.revoke_invitation(db, ctx, invitation_id)
+
+
 @router.get("/v1/invitations", response_model=list[InvitationOut])
 async def pending_invitations(
     ctx: Admin,

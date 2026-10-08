@@ -79,17 +79,21 @@ const BADGE: Partial<Record<DocumentItem["status"], string>> = {
 
 function DocumentRow({ d, canDelete }: { d: DocumentItem; canDelete: boolean }) {
   const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const qc = useQueryClient();
   const badge = BADGE[d.status] ?? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300";
 
   async function remove() {
+    setDeleting(true);
     try {
       await sendJson("DELETE", `/api/v1/documents/${d.id}`);
       await qc.invalidateQueries({ queryKey: ["documents"] });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Delete failed");
       setConfirming(false);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -115,15 +119,25 @@ function DocumentRow({ d, canDelete }: { d: DocumentItem; canDelete: boolean }) 
         <td className="px-3 py-2 text-right whitespace-nowrap">
           {confirming ? (
             <span className="inline-flex gap-1">
-              <Button variant="danger" className="px-2 py-1 text-xs" onClick={() => void remove()}>
-                Delete
+              <Button variant="danger" className="px-2 py-1 text-xs" disabled={deleting} onClick={() => void remove()}>
+                {deleting ? "Deleting…" : "Delete"}
               </Button>
-              <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => setConfirming(false)}>
+              <Button
+                variant="ghost"
+                className="px-2 py-1 text-xs"
+                disabled={deleting}
+                onClick={() => setConfirming(false)}
+              >
                 Cancel
               </Button>
             </span>
           ) : (
-            <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => setConfirming(true)}>
+            <Button
+              variant="ghost"
+              className="px-2 py-1 text-xs"
+              aria-label={`Delete ${d.title}`}
+              onClick={() => setConfirming(true)}
+            >
               Delete
             </Button>
           )}
