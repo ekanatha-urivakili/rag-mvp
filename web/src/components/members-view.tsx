@@ -18,6 +18,7 @@ export function MembersView() {
   const [invitePage, setInvitePage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [revoking, setRevoking] = useState<string | null>(null);
   const [note, setNote] = useState<{ tone: "error" | "success"; text: string } | null>(null);
   const members = useQuery({
     queryKey: ["members", me.tenant.id, page],
@@ -38,6 +39,7 @@ export function MembersView() {
       await sendJson(method, path, body);
       setNote({ tone: "success", text: message });
       setRemoving(null);
+      setRevoking(null);
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["members"] }),
         qc.invalidateQueries({ queryKey: ["invitations"] }),
@@ -208,11 +210,43 @@ export function MembersView() {
             ) : (
               <ul className="divide-y divide-zinc-200 rounded-xl border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
                 {invitations.data.map((item) => (
-                  <li key={item.id} className="flex flex-wrap justify-between gap-2 p-3 text-sm">
-                    <span>
+                  <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
+                    <span className="min-w-0 break-all">
                       {item.email} · {item.role}
                     </span>
-                    <span className="text-zinc-500">Expires {new Date(item.expires_at).toLocaleString()}</span>
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="text-zinc-500">Expires {new Date(item.expires_at).toLocaleString()}</span>
+                      {revoking === item.id ? (
+                        <>
+                          <Button
+                            variant="danger"
+                            disabled={busy}
+                            onClick={() =>
+                              void change(
+                                "DELETE",
+                                `/api/v1/invitations/${item.id}`,
+                                undefined,
+                                `Invitation for ${item.email} revoked.`,
+                              )
+                            }
+                          >
+                            Revoke
+                          </Button>
+                          <Button variant="ghost" disabled={busy} onClick={() => setRevoking(null)}>
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          disabled={busy}
+                          aria-label={`Revoke invitation for ${item.email}`}
+                          onClick={() => setRevoking(item.id)}
+                        >
+                          Revoke
+                        </Button>
+                      )}
+                    </span>
                   </li>
                 ))}
               </ul>

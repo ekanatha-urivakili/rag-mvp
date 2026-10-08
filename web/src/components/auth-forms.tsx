@@ -279,14 +279,23 @@ export function AcceptInviteForm({ token }: { token: string | null }) {
       }}
     >
       <h1 className="text-lg font-semibold">Join your team</h1>
-      <p className="text-sm text-zinc-500">New here? Choose a password. Already have an account? Leave it empty.</p>
+      <p className="text-sm text-zinc-500">
+        New here? Choose a password (12–128 characters). Already have an account? Enter your current password.
+      </p>
       <Field
-        label="Password (12–128 characters)"
+        label="Password"
         name="password"
         type="password"
-        autoComplete="new-password"
+        autoComplete="current-password"
+        required
         maxLength={128}
       />
+      <p className="text-xs text-zinc-500">
+        <Link href="/login" className="text-indigo-600 underline dark:text-indigo-400">
+          Forgot your password?
+        </Link>{" "}
+        Reset it from the sign-in page, then open this link again.
+      </p>
       <Button type="submit" disabled={busy} className="w-full">
         Accept invitation
       </Button>

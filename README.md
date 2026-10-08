@@ -37,7 +37,7 @@ The default UI is Next.js; Streamlit is available through the optional `legacy` 
 - Settings for every role: light/dark/device theme, editable profile name, verified email display, and current-password-verified password changes that revoke all sessions. Administrator API keys include help on hover/focus.
 - Roles: **viewer** (chat, read documents), **editor** (+ upload/delete documents), **admin** (+ members, API keys, audit log). Guards prevent removing or demoting the last admin.
 - API keys for programmatic access, scoped to a tenant and role: create, list, copy the secret once, and revoke. Secrets are stored as hashes; user-owned chat and profile/password changes require a user session.
-- Member management includes pending invitations, role changes, removal, and paginated lists. Audit history supports loading older events.
+- Member management includes pending invitations (with revocation; re-inviting supersedes the earlier link), role changes, removal, and paginated lists. Audit history supports loading older events.
 - An audit log of security-relevant events.
 
 **Platform**
@@ -387,13 +387,13 @@ All routes are versioned under `/v1`. Protected routes require a JWT (`Authoriza
 | Area | Endpoints | Permission |
 | --- | --- | --- |
 | Auth | `POST /auth/signup`, `/auth/signup/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/switch-tenant`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/password/change` | public, except logout/switch/change |
-| Invitation acceptance | `POST /invitations/accept` | public; single-use invitation token |
+| Invitation acceptance | `POST /invitations/accept` | public; single-use invitation token (existing accounts must also give their current password) |
 | Profile | `GET /me`, `PATCH /me` (name) | any role; edits require a user session |
 | Chat | `POST /chat` (SSE: `status`, `model`, `token`, `answer`, `citations`, `done`, `error`, and development-only `debug`; pass `conversation_id` to continue a chat), `POST /messages/{id}/feedback` | `chat:use`, user session |
 | Chat history | `GET /conversations?limit&q&before&before_id` (most recent first, keyset paging, title search), `GET /conversations/{id}?limit&before`, `PATCH`/`DELETE /conversations/{id}` | `chat:use`, user session, own only |
 | Documents | `POST /documents`, `GET /documents[/{id}]`, `DELETE /documents/{id}` | `document:read` / `write` / `delete` |
 | Receipts | `POST /receipts`, `GET /receipts`, `GET /receipts/{document_id}`; upload status via `GET /documents?kind=receipt` | `document:write` / `read` |
-| Members | `GET /members`, `PATCH`/`DELETE /members/{user_id}`, `POST`/`GET /invitations` | `member:manage` |
+| Members | `GET /members`, `PATCH`/`DELETE /members/{user_id}`, `POST`/`GET /invitations`, `DELETE /invitations/{id}` | `member:manage` |
 | API keys | `GET`/`POST /api-keys`, `DELETE /api-keys/{id}` | `apikey:manage` |
 | Audit | `GET /audit-log?limit&before_id` (newest first, ID cursor) | `audit:read` |
 | Health | `GET /healthz`, `GET /readyz` (unversioned) | public |

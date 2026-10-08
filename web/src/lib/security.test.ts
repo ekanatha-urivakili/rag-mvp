@@ -20,6 +20,11 @@ describe("resolveProxyTarget (BFF allowlist)", () => {
     ["DELETE", ["members", ID], `/v1/members/${ID}`],
     ["GET", ["invitations"], "/v1/invitations"],
     ["POST", ["invitations"], "/v1/invitations"],
+    [
+      "DELETE",
+      ["invitations", "6f1d3c1e-6b7a-4f0e-9d55-6a1c2b3d4e5f"],
+      "/v1/invitations/6f1d3c1e-6b7a-4f0e-9d55-6a1c2b3d4e5f",
+    ],
     ["GET", ["api-keys"], "/v1/api-keys"],
     ["POST", ["api-keys"], "/v1/api-keys"],
     ["DELETE", ["api-keys", ID], `/v1/api-keys/${ID}`],

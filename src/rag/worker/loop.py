@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.adapters.storage import get_storage
 from rag.adapters.vectorstore import get_vectorstore
+from rag.auth.service import purge_expired_tokens
 from rag.core import ratelimit
 from rag.core.config import get_settings
 from rag.core.logging import configure_logging, log_extra, redact
@@ -138,6 +139,7 @@ async def main() -> None:
         if time.monotonic() - last_purge > 3600:
             async with get_sessionmaker()() as db:
                 await ratelimit.purge_expired(db)
+                await purge_expired_tokens(db)
                 await db.commit()
             last_purge = time.monotonic()
         if not await run_once():

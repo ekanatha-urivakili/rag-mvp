@@ -370,7 +370,8 @@ Single collection with `tenant_id` partitioning; the filter is enforced inside t
 | `POST` | `/v1/auth/password/forgot` | public | Always `202` (no account enumeration); emails reset link if user exists |
 | `POST` | `/v1/auth/password/reset` | reset token | Set new password; revokes all refresh tokens |
 | `POST` | `/v1/invitations` | `member:manage` | `{email, role}` → emails invite link |
-| `POST` | `/v1/invitations/accept` | invite token | Create user (or attach existing) + membership |
+| `POST` | `/v1/invitations/accept` | invite token | Create user, or attach an existing account after verifying its current password; + membership. 5 attempts per link per hour |
+| `DELETE` | `/v1/invitations/{id}` | `member:manage` | Revoke a pending invitation (tenant-scoped, audited) |
 | `GET` | `/v1/me` | authenticated | User, current tenant, role, permissions (UI uses this to show/hide actions) |
 | `GET` | `/v1/members` | `member:manage` | List members |
 | `PATCH` | `/v1/members/{user_id}` | `member:manage` | Change role (cannot demote the last admin) |
@@ -607,7 +608,7 @@ The shell loads `/v1/me` server-side and shows/hides actions by permission (UX o
 | `/c/{id}` | `chat:use` (own only) | Past conversation: latest 200 messages, "Load earlier", composer continues it. Streamed answers, status/model line, `[n]` citations with **Sources**, 👍/👎 feedback, Stop button |
 | `/documents` | `document:read` | Live status table (polls only while ingesting); upload/delete with `document:write`/`document:delete` |
 | `/receipts` | `document:read` | Paginated extracted receipts, details/line items/totals/payment/warnings; upload via Documents |
-| `/members` | `member:manage` | Email invitations, pending invitations, paginated member list, role changes, confirmed removal; own role/removal disabled |
+| `/members` | `member:manage` | Email invitations, pending invitations with confirmed revocation, paginated member list, role changes, confirmed removal; own role/removal disabled |
 | `/settings` | `apikey:manage` and/or `audit:read` | Paginated keys, creation with one-time secret display/copy/dismiss, confirmed revocation, audit history with keyset pagination |
 
 History sidebar: "New chat", debounced title search, groups (Today / Yesterday / Previous 7 days / Older), keyset "Load more", inline rename, two-step delete. The first answer in a new chat moves the URL to `/c/{id}` without re-fetching.

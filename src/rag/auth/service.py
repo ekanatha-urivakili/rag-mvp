@@ -3,7 +3,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -324,6 +324,17 @@ async def invite(db: AsyncSession, ctx: RequestContext, *, email: str, role: Rol
     tenant = await db.get(Tenant, ctx.tenant_id)
     inviter = await db.get(User, ctx.user_id) if ctx.user_id else None
     assert tenant is not None
+    # Re-inviting supersedes earlier links (the role may differ); only the newest link stays valid.
+    await db.execute(
+        update(EmailToken)
+        .where(
+            EmailToken.email == email,
+            EmailToken.tenant_id == ctx.tenant_id,
+            EmailToken.type == "invite",
+            EmailToken.used_at.is_(None),
+        )
+        .values(used_at=_now())
+    )
     raw = new_opaque_token()
     db.add(
         EmailToken(
@@ -361,8 +372,44 @@ async def invite(db: AsyncSession, ctx: RequestContext, *, email: str, role: Rol
     await db.commit()
 
 
+async def revoke_invitation(db: AsyncSession, ctx: RequestContext, invitation_id: uuid.UUID) -> None:
+    tok = (
+        await db.execute(
+            select(EmailToken)
+            .where(
+                EmailToken.id == invitation_id,
+                EmailToken.tenant_id == ctx.tenant_id,
+                EmailToken.type == "invite",
+                EmailToken.used_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if tok is None:
+        raise NotFound("Invitation not found")
+    tok.used_at = _now()
+    audit(
+        db,
+        action="member.invite_revoked",
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        target_type="email",
+        ip=ctx.ip,
+        email=tok.email,
+    )
+    await db.commit()
+
+
+async def purge_expired_tokens(db: AsyncSession, grace: timedelta = timedelta(days=1)) -> None:
+    """Retention: expired refresh tokens (reuse detection no longer needs them) and spent email links."""
+    cutoff = _now() - grace
+    await db.execute(delete(RefreshToken).where(RefreshToken.expires_at < cutoff))
+    await db.execute(delete(EmailToken).where(EmailToken.expires_at < cutoff))
+
+
 async def accept_invite(db: AsyncSession, *, token: str, password: str | None, ip: str | None) -> TokenPair:
     await ratelimit.hit(db, f"accept:ip:{ip}", 20, 3600)
+    await ratelimit.hit(db, f"accept:token:{hash_token(token)}", 5, 3600)
     tok = await _consume_email_token(db, token, "invite")
     assert tok.tenant_id is not None and tok.role is not None
     user = (await db.execute(select(User).where(User.email == tok.email).with_for_update())).scalar_one_or_none()
@@ -375,6 +422,11 @@ async def accept_invite(db: AsyncSession, *, token: str, password: str | None, i
         await db.flush()
     elif not user.is_active:
         raise AppError("This link is invalid or has expired", code="invalid_token")
+    else:
+        # The link proves control of the mailbox, not of the account: a leaked invite must not become a login.
+        ok, _ = await asyncio.to_thread(verify_password, password or "", user.password_hash)
+        if not ok:
+            raise AppError("Enter the current password for your existing account", code="invalid_password")
 
     exists = await db.get(Membership, (user.id, tok.tenant_id))
     if exists is None:
