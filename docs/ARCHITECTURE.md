@@ -454,7 +454,7 @@ async def upload(
 - Config (env only, no code change between environments):
 
 ```text
-SMTP_HOST=mailpit   SMTP_PORT=1025   SMTP_TLS=false   SMTP_FROM="RAG <no-reply@localhost>"   # local
+SMTP_HOST=mailpit   SMTP_PORT=1025   SMTP_TLS=false   SMTP_FROM="Moontig <no-reply@localhost>"   # local
 SMTP_HOST=<provider> SMTP_PORT=587   SMTP_TLS=true    SMTP_USER/SMTP_PASSWORD from secrets  # prod
 ```
 

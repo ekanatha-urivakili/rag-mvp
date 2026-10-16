@@ -4,7 +4,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme";
 
 export const metadata: Metadata = {
-  title: "FolioNest",
+  title: "Moontig",
   description: "Ask questions about your documents",
   referrer: "no-referrer",
 };

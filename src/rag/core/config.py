@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     smtp_tls: bool = False
     smtp_user: str | None = None
     smtp_password: SecretStr | None = None
-    smtp_from: str = "RAG <no-reply@localhost>"
+    smtp_from: str = "Moontig <no-reply@localhost>"
     smtp_timeout_s: int = 10
 
     # --- Worker ---

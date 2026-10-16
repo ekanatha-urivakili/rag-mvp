@@ -2,7 +2,7 @@ import streamlit as st
 import views
 from api import ApiError, can, me
 
-st.set_page_config(page_title="RAG Assistant", page_icon=":material/forum:", layout="wide")
+st.set_page_config(page_title="Moontig", page_icon=":material/forum:", layout="wide")
 
 # Single-use tokens arrive as ?token=… from email links: capture once, then strip from the URL.
 if token := st.query_params.get("token"):
