@@ -7,6 +7,7 @@ import { createContext, useContext, useState } from "react";
 import { ApiError, sendJson } from "@/lib/client";
 import { navigationFor } from "@/lib/navigation";
 import { Brand, Footer } from "@/components/brand";
+import { ThemeToggle } from "@/components/theme";
 import type { Me } from "@/lib/types";
 
 const MeContext = createContext<Me | null>(null);
@@ -113,6 +114,7 @@ function TopBar() {
         <span className="hidden max-w-56 truncate text-zinc-500 xl:inline" title={me.email ?? undefined}>
           {me.email}
         </span>
+        <ThemeToggle />
         <button
           onClick={() => void signOut()}
           className="rounded-md px-2 py-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"

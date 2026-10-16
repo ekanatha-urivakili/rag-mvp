@@ -2,7 +2,7 @@ import Link from "next/link";
 
 export function Brand() {
   return (
-    <Link href="/" className="inline-flex items-center gap-2 font-semibold tracking-tight" aria-label="FolioNest home">
+    <Link href="/" className="inline-flex items-center gap-2 font-semibold tracking-tight" aria-label="Moontig home">
       <svg viewBox="0 0 40 40" width="34" height="34" fill="none" aria-hidden="true">
         <rect width="40" height="40" rx="12" fill="#0d9488" />
         <path d="M12 10h13l5 5v17H12z" fill="#eef2ff" />
@@ -11,7 +11,7 @@ export function Brand() {
         <circle cx="11" cy="30" r="6" fill="#fbbf24" />
         <path d="m8 30 2 2 4-4" stroke="#134e4a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
-      FolioNest
+      Moontig
     </Link>
   );
 }
@@ -23,7 +23,7 @@ export function Hero() {
         Your workspace, thoughtfully organised
       </p>
       <h1 className="mt-1 text-xl font-semibold sm:text-2xl">A home for every document and receipt.</h1>
-      <p className="mt-1 text-sm text-indigo-100">Upload, scan, and find answers with FolioNest.</p>
+      <p className="mt-1 text-sm text-indigo-100">Upload, scan, and find answers with Moontig.</p>
     </section>
   );
 }
@@ -31,7 +31,7 @@ export function Hero() {
 export function Footer() {
   return (
     <footer className="flex shrink-0 flex-wrap justify-center gap-x-5 gap-y-1 border-t border-zinc-200 px-3 py-2 text-xs text-zinc-500 dark:border-zinc-800">
-      <span>FolioNest</span>
+      <span>Moontig</span>
       <Link href="/">Home</Link>
       <Link href="/documents">Upload docs</Link>
       <Link href="/receipts">Scan receipts</Link>

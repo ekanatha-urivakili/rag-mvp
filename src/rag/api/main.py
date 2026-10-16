@@ -53,7 +53,7 @@ def create_app() -> FastAPI:
     s = get_settings()
     configure_logging(s.log_level)
     app = FastAPI(
-        title="RAG MVP API",
+        title="Moontig API",
         version="1.0.0",
         lifespan=lifespan,
         # API inventory is not public in prod (OWASP API9).

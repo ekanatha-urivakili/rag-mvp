@@ -1,8 +1,12 @@
 import { Brand, Hero } from "@/components/brand";
+import { ThemeToggle } from "@/components/theme";
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
-    <main className="grid min-h-dvh place-items-center bg-zinc-50 px-4 py-10 dark:bg-zinc-950">
+    <main className="relative grid min-h-dvh place-items-center bg-zinc-50 px-4 py-10 dark:bg-zinc-950">
+      <div className="absolute top-3 right-3">
+        <ThemeToggle />
+      </div>
       <div className="w-full max-w-sm">
         <div className="mb-6 flex justify-center">
           <Brand />

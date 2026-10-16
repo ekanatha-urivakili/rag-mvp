@@ -60,7 +60,7 @@ async def test_existing_signup_is_generic_and_does_not_replace_user(client: http
     while await run_once():
         pass
     [message] = await mailpit_messages(tenant.email)
-    assert message["Subject"] == "You already have a RAG account"
+    assert message["Subject"] == "You already have a Moontig account"
     body = await mailpit_body(str(message["ID"]))
     assert f"{get_settings().public_ui_url}/login" in body and "token=" not in body
     assert (await client.post("/v1/auth/login", json={"email": tenant.email, "password": PASSWORD})).status_code == 200
