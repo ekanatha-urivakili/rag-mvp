@@ -68,3 +68,26 @@ option {
   background: #18181b;
   color: #f4f4f5;
 }
+
+:where(a, button, summary, select):focus-visible {
+  outline: 2px solid #0d9488;
+  outline-offset: 3px;
+}
+.settings-content > section {
+  @apply scroll-mt-6 rounded-2xl border border-zinc-200 p-5 sm:p-6 dark:border-zinc-800;
+}
+.settings-content :where(h2, #help) {
+  scroll-margin-top: 1.5rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+[data-theme="dark"] .text-zinc-500 {
+  color: var(--color-zinc-400);
+}

@@ -3,7 +3,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Hero } from "@/components/brand";
+import Link from "next/link";
 import { Markdown } from "@/components/markdown";
 import { Alert, Button } from "@/components/ui";
 import { ApiError, getJson, request, sendJson } from "@/lib/client";
@@ -204,7 +204,9 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
         }}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6">
+        <div
+          className={`mx-auto max-w-3xl space-y-6 px-4 py-6 ${messages.length === 0 ? "flex min-h-full items-center justify-center" : ""}`}
+        >
           {hasMore && (
             <div className="text-center">
               <Button variant="ghost" onClick={() => void loadOlder()}>
@@ -239,13 +241,31 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
 function EmptyState() {
   return (
-    <div className="space-y-6 pt-4 text-center sm:pt-[8vh]">
-      <Hero />
-      <h2 className="text-xl font-semibold">Ask your documents</h2>
+    <div className="w-full space-y-6 pb-8 text-center">
+      <p className="text-xs font-medium uppercase tracking-[0.2em] text-teal-700 dark:text-teal-400">
+        Your personal knowledge space
+      </p>
+      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">What would you like to know?</h1>
       <p className="mt-2 text-sm text-zinc-500">
         Answers are grounded in your workspace&apos;s documents and cite their sources. Earlier chats are in the
         sidebar; open one to continue it.
       </p>
+      <div className="mx-auto grid max-w-lg gap-3 text-left sm:grid-cols-2">
+        <Link
+          href="/documents"
+          className="rounded-2xl border border-zinc-200 p-4 text-sm transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+        >
+          <span className="block font-medium">Explore your documents</span>
+          <span className="mt-1 block text-xs text-zinc-500">Upload files to give your answers context.</span>
+        </Link>
+        <Link
+          href="/receipts"
+          className="rounded-2xl border border-zinc-200 p-4 text-sm transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+        >
+          <span className="block font-medium">Organise your receipts</span>
+          <span className="mt-1 block text-xs text-zinc-500">Scan purchases and review the details.</span>
+        </Link>
+      </div>
     </div>
   );
 }
@@ -378,9 +398,9 @@ function Composer({
   }
 
   return (
-    <div className="border-t border-zinc-200 px-4 py-3 dark:border-zinc-800">
+    <div className="shrink-0 px-4 pt-3 pb-1">
       <form
-        className="mx-auto flex max-w-3xl items-end gap-2"
+        className="mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-200 bg-zinc-100 p-3 shadow-sm focus-within:ring-2 focus-within:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
@@ -398,19 +418,19 @@ function Composer({
           rows={Math.min(8, Math.max(1, text.split("\n").length))}
           maxLength={MAX_CHARS}
           placeholder={placeholder}
-          className="min-h-11 flex-1 resize-none rounded-xl border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-900"
+          className="min-h-11 min-w-0 flex-1 resize-none bg-transparent px-2 py-2.5 outline-none"
         />
         {disabled ? (
-          <Button type="button" variant="secondary" onClick={onStop} className="h-11">
+          <Button type="button" variant="secondary" onClick={onStop} className="h-11 rounded-full">
             Stop
           </Button>
         ) : (
-          <Button type="submit" disabled={!trimmed} className="h-11">
+          <Button type="submit" disabled={!trimmed} className="h-11 rounded-full">
             Send
           </Button>
         )}
       </form>
-      <p className="mx-auto mt-1 max-w-3xl text-right text-xs text-zinc-400">
+      <p className="mx-auto mt-1 max-w-3xl text-right text-xs text-zinc-500">
         {text.length > MAX_CHARS - 500 ? `${text.length}/${MAX_CHARS}` : "Enter to send · Shift+Enter for a new line"}
       </p>
     </div>

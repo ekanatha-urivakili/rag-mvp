@@ -17,12 +17,58 @@ export function SettingsView() {
   const audit = useCan("audit:read");
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-8 px-4 py-6">
-        <h1 className="text-xl font-semibold">Settings</h1>
+      <div className="settings-content mx-auto max-w-4xl space-y-6 px-4 py-8 sm:px-8">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+          <p className="mt-2 text-sm text-zinc-500">Make Moontig feel like your own.</p>
+        </div>
+        <nav aria-label="Settings sections" className="flex flex-wrap gap-2 text-sm">
+          {[
+            { href: "#appearance-heading", label: "Appearance" },
+            { href: "#profile-heading", label: "Profile" },
+            ...(keys ? [{ href: "#api-keys-heading", label: "API keys" }] : []),
+            ...(audit ? [{ href: "#audit-heading", label: "Audit history" }] : []),
+            { href: "#help", label: "Help" },
+          ].map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              className="rounded-full border border-zinc-200 px-4 py-2 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              {item.label}
+            </a>
+          ))}
+        </nav>
         <ThemeSettings />
         <ProfileSettings />
         {keys && <ApiKeys />}
         {audit && <AuditLog />}
+        <section id="help" aria-labelledby="help-heading" className="space-y-3">
+          <h2 id="help-heading" className="text-lg font-semibold">
+            Help &amp; workspace guide
+          </h2>
+          <details>
+            <summary className="cursor-pointer text-sm font-medium">How do I get better answers?</summary>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Upload documents and wait until they are ready, then ask a specific question in a new chat. Open Sources
+              beneath an answer to check the original context.
+            </p>
+          </details>
+          <details>
+            <summary className="cursor-pointer text-sm font-medium">Who can access my workspace?</summary>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Documents and receipts are shared with members of the current workspace. Administrators manage membership
+              and API keys. Use the account menu to switch workspaces.
+            </p>
+          </details>
+          <details>
+            <summary className="cursor-pointer text-sm font-medium">Where can I see usage?</summary>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Open Usage in the sidebar to see current document and receipt upload counts. Workspace file access is
+              required.
+            </p>
+          </details>
+        </section>
       </div>
     </div>
   );

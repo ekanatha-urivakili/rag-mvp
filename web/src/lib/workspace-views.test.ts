@@ -23,6 +23,7 @@ vi.mock("@/components/app-shell", () => ({
 const { MembersView } = await import("@/components/members-view");
 const { ReceiptsView } = await import("@/components/receipts-view");
 const { SettingsView } = await import("@/components/settings-view");
+const { UsageView } = await import("@/components/usage-view");
 
 function render(view: ComponentType, client = new QueryClient()) {
   return renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(view)));
@@ -92,6 +93,24 @@ describe("workspace views", () => {
     expect(html).toContain("rk_123456789abc_…");
     expect(html).not.toContain("New API key");
     expect(html).toContain("Audit history");
+  });
+  it("uses complete upload totals rather than the fetched page length", () => {
+    const client = new QueryClient();
+    client.setQueryData(["usage", "workspace"], { documents: 125, receipts: 40 });
+    const html = render(UsageView, client);
+    expect(html).toContain(">165</dd>");
+    expect(html).toContain(">125</dd>");
+    expect(html).toContain(">40</dd>");
+    expect(html).toContain("Deleted files are excluded");
+    expect(html).toContain("Token usage, storage totals, billing, and plan limits are not currently available");
+  });
+  it("does not show usage without document access or present loading counts as zero", () => {
+    state.me.permissions = [];
+    expect(render(UsageView)).toContain("permission to view workspace usage");
+    state.me.permissions = ["document:read"];
+    const html = render(UsageView);
+    expect(html).toContain("Loading workspace usage");
+    expect(html).not.toContain("<dd");
   });
   it("shows an actionable empty receipt list", () => {
     const client = new QueryClient();
