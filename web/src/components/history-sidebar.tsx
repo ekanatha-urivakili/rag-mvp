@@ -50,15 +50,9 @@ export function HistorySidebar({ activeId, onNavigate }: { activeId: string | nu
   }
 
   return (
-    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
-      <div className="space-y-2 p-3">
-        <Link
-          href="/"
-          onClick={onNavigate}
-          className="flex w-full items-center justify-center rounded-lg bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900"
-        >
-          + New chat
-        </Link>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="px-3 pb-3">
+        <h2 className="px-2 pb-2 text-xs font-medium text-zinc-500">Your chats</h2>
         <input
           type="search"
           value={search}
@@ -95,7 +89,7 @@ export function HistorySidebar({ activeId, onNavigate }: { activeId: string | nu
           </button>
         )}
       </nav>
-    </aside>
+    </div>
   );
 }
 
