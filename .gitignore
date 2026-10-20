@@ -46,3 +46,4 @@ Thumbs.db
 
 # Local backups (scripts/backup.py)
 backups/
+.ollama.log

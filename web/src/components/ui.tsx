@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import { PasswordField } from "@/components/password-field";
 
 const variants = {
   primary: "bg-teal-700 text-white hover:bg-teal-600 dark:bg-teal-500 dark:text-zinc-950 dark:hover:bg-teal-400",
@@ -22,6 +23,7 @@ export function Button({
 }
 
 export function Field({ label, ...props }: InputHTMLAttributes<HTMLInputElement> & { label: string }) {
+  if (props.type === "password") return <PasswordField label={label} {...props} />;
   return (
     <label className="block text-sm">
       <span className="mb-1 block font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
