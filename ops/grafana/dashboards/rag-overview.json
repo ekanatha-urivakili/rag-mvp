@@ -203,7 +203,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 1e-9)",
+          "expr": "sum(rate(http_requests_total{job=\"rag-api\",route!~\"/metrics|/healthz|/readyz\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_requests_total{job=\"rag-api\",route!~\"/metrics|/healthz|/readyz\"}[5m])), 1e-9)",
           "legendFormat": "5xx",
           "datasource": {
             "type": "prometheus",

@@ -121,6 +121,13 @@ class Settings(BaseSettings):
     # Share of generated answers judged asynchronously by the `eval_judge` route (sends context to that provider).
     online_eval_sample_rate: float = Field(default=0.0, ge=0, le=1)
 
+    @field_validator("metrics_token")
+    @classmethod
+    def _nonempty_metrics_token(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is not None and not v.get_secret_value().strip():
+            raise ValueError("METRICS_TOKEN must not be empty")
+        return v
+
     @field_validator("jwt_secret")
     @classmethod
     def _strong_jwt_secret(cls, v: SecretStr) -> SecretStr:

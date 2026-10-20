@@ -4,6 +4,7 @@ import { ADMIN_STATE } from "./helpers";
 // Needs a working model route (local Ollama or a cloud key), so it is opt-in: E2E_CHAT=1.
 test.skip(!process.env.E2E_CHAT, "set E2E_CHAT=1 when a model is available");
 test.use({ storageState: ADMIN_STATE });
+test.setTimeout(180_000);
 
 test("a new chat streams an answer, moves to /c/{id}, and appears in history", async ({ page }) => {
   const message = `Hello! What can you help me with? (${crypto.randomUUID().slice(0, 8)})`;

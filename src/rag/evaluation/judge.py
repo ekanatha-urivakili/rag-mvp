@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select, tuple_
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.adapters.llm.base import Message
@@ -64,16 +65,19 @@ async def judge_answer(db: AsyncSession, payload: dict[str, Any]) -> None:
     if row is None:
         return  # conversation deleted since: nothing to judge
     answer, tenant_id = row
+    if await db.get(AnswerEval, message_id) is not None:
+        return
+    # Old queued jobs lack the original question ID; guessing by timestamp can grade another turn.
+    question_id = payload.get("question_message_id")
+    if question_id is None:
+        return
     question = (
         await db.execute(
-            select(MessageRow.content)
-            .where(
+            select(MessageRow.content).where(
                 MessageRow.conversation_id == answer.conversation_id,
                 MessageRow.role == "user",
-                MessageRow.created_at <= answer.created_at,
+                MessageRow.id == uuid.UUID(question_id),
             )
-            .order_by(MessageRow.created_at.desc())
-            .limit(1)
         )
     ).scalar_one_or_none()
     refs = [(uuid.UUID(d), int(v), int(i)) for d, v, i in payload["chunks"]]
@@ -85,6 +89,8 @@ async def judge_answer(db: AsyncSession, payload: dict[str, Any]) -> None:
                 .join(Document, Document.id == Chunk.document_id)
                 .where(
                     Document.tenant_id == tenant_id,
+                    Document.status == "ready",
+                    Document.version == Chunk.version,
                     tuple_(Chunk.document_id, Chunk.version, Chunk.chunk_index).in_(refs),
                 )
             )
@@ -109,13 +115,15 @@ async def judge_answer(db: AsyncSession, payload: dict[str, Any]) -> None:
         for c, title in (found[r] for r in refs)
     ]
     verdict, provider, model = await judge(build_context(chunks), question, answer.content)
-    db.add(
-        AnswerEval(
+    await db.execute(
+        insert(AnswerEval)
+        .values(
             message_id=message_id,
             faithfulness=verdict.faithfulness,
             relevancy=verdict.relevancy,
             judge_provider=provider,
             judge_model=model,
         )
+        .on_conflict_do_nothing(index_elements=[AnswerEval.message_id])
     )
     await db.commit()

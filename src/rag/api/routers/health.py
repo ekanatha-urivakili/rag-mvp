@@ -55,7 +55,10 @@ async def prometheus_metrics(request: Request) -> Response:
         if s.is_prod:
             raise NotFound("Not found")
     else:
-        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").encode()
+        authorization = request.headers.get("authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise Unauthorized("Invalid metrics token")
+        supplied = authorization.removeprefix("Bearer ").encode()
         if not hmac.compare_digest(supplied, s.metrics_token.get_secret_value().encode()):
             raise Unauthorized("Invalid metrics token")
     async with get_sessionmaker()() as db:

@@ -225,6 +225,7 @@ class Job(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     run_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (
@@ -233,6 +234,7 @@ class Job(Base):
         ),
         CheckConstraint("status in ('queued','running','done','failed')", name="ck_job_status"),
         Index("ix_jobs_claim", "status", "run_after"),
+        Index("ix_jobs_finished", "status", "finished_at"),
     )
 
 

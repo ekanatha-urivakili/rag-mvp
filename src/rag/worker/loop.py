@@ -56,7 +56,7 @@ _CLAIM = text(
 async def _finish(db: AsyncSession, job_id: str, job_type: str) -> None:
     await db.execute(
         text(
-            "UPDATE jobs SET status = 'done', error = NULL, "
+            "UPDATE jobs SET status = 'done', error = NULL, finished_at = now(), "
             "payload = CASE WHEN :scrub THEN jsonb_build_object('redacted', true) ELSE payload END WHERE id = :id"
         ),
         {"id": job_id, "scrub": job_type == "send_email"},
@@ -71,7 +71,7 @@ async def _fail(
     if attempts >= get_settings().job_max_attempts:
         await db.execute(
             text(
-                "UPDATE jobs SET status = 'failed', error = :e, "
+                "UPDATE jobs SET status = 'failed', error = :e, finished_at = now(), "
                 "payload = CASE WHEN :scrub THEN jsonb_build_object('redacted', true) ELSE payload END WHERE id = :id"
             ),
             {"id": job_id, "e": message, "scrub": job_type == "send_email"},

@@ -1,8 +1,10 @@
 # Runbooks
 
-Operational procedures for the Moontig RAG stack ([architecture](ARCHITECTURE.md), §8 Phase 6). Commands assume the local Podman deployment from the repo root; in production, run the same scripts against the production `.env` from a host that can reach Postgres, Qdrant and object storage.
+Operational procedures for the Moontig RAG stack ([architecture](ARCHITECTURE.md), §8 Phase 6). Commands assume the local Podman deployment from the repo root. Backup commands require `DATABASE_URL` and the Compose `postgres` container to address the same cluster; they refuse mismatched targets. Use provider-native tools for a remote database.
 
 Alerts in [`ops/prometheus/alerts.yml`](../ops/prometheus/alerts.yml) point here:
+
+The local profile evaluates rules in Prometheus. It does not configure Alertmanager or notification receivers; `severity: page` labels do not send pages until that delivery path is configured and tested.
 
 | Alert | Runbook |
 | --- | --- |
@@ -75,14 +77,14 @@ Useful views: Grafana dashboard **Moontig RAG overview** (`podman compose --prof
 
 Backups cover Postgres (source of truth), the Qdrant collection behind the alias, and raw uploads in object storage. Qdrant can always be rebuilt from Postgres with [re-indexing](#re-indexing); its snapshot is only the faster path.
 
-**Take a backup** (consistent Postgres snapshot; safe while the app is running):
+**Take a backup** (consistent Postgres snapshot). For a recoverable snapshot across all three stores, stop `web`, `api` and `worker` while backing up; concurrent upload, purge and re-index jobs can otherwise change the objects or index after the database snapshot. Restart them after the command completes. `--skip-objects` needs a separately retained raw-upload backup.
 
 ```bash
 uv run python scripts/backup.py backup                    # writes backups/<UTC timestamp>/
 uv run python scripts/backup.py backup --skip-objects     # database + index only
 ```
 
-**Restore test** (the Phase 6 exit check; run after every backup job and at least weekly). It restores into a scratch database and scratch Qdrant collection, compares row and point counts with the manifest, then removes both. It does not touch live data:
+**Restore test** (the Phase 6 exit check; run after every backup job and at least weekly). It first validates SHA-256 checksums for every artifact, then restores into uniquely named scratch targets, compares row and point counts, and removes its own scratch resources. It does not drop pre-existing databases. Backups created before the integrity manifest was added must be recreated.
 
 ```bash
 uv run python scripts/backup.py verify backups/<timestamp>
@@ -91,10 +93,10 @@ uv run python scripts/backup.py verify backups/<timestamp>
 **Restore live data** (destructive; overwrites the database and index):
 
 1. Stop traffic and background work: `podman compose stop web api worker`.
-2. Restore: `uv run python scripts/backup.py restore backups/<timestamp> --yes`. Postgres restores in a single transaction (all or nothing). The Qdrant snapshot is recovered into its original collection and the alias is pointed at it. Raw files are uploaded; objects created after the backup are left in place and are unreferenced.
+2. Run `verify` successfully, then restore: `uv run python scripts/backup.py restore backups/<timestamp> --yes`. Missing or corrupted artifacts are rejected before live writes. Postgres restores in a single transaction (all or nothing); the complete multi-store restore is not atomic. The Qdrant snapshot is recovered into its original collection and the alias is pointed at it. Raw files are uploaded; objects created after the backup are left in place and are unreferenced.
 3. If the backup predates the current schema, start the API so `alembic upgrade head` runs, or run it as a release step in production.
 4. Start the services: `podman compose up -d`. Check `/readyz` and the document list.
-5. If the Qdrant snapshot is missing or bad, restore Postgres only and run [re-indexing](#re-indexing) to a new collection version.
+5. If a snapshot is missing or bad, recover a valid backup before proceeding. A Postgres-only recovery requires provider-native restore tools; this CLI validates and restores the complete manifest.
 
 Production notes: keep backups off the database host, encrypted, with retention that matches your recovery point objective. Managed Postgres point-in-time recovery and Qdrant Cloud snapshots replace the corresponding steps here; keep the restore test.
 

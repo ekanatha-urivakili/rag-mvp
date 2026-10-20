@@ -51,7 +51,11 @@ def _start(environment: Environment, **_: object) -> None:
 @events.quitting.add_listener
 def _gate(environment: Environment, **_: object) -> None:
     ttft = environment.stats.get("SSE chat ttft", "SSE")
+    if environment.stats.total.num_failures:
+        environment.process_exit_code = 1
     if ttft.num_requests == 0:
+        print("No successful chat answers were measured")
+        environment.process_exit_code = 1
         return
     p95_s = ttft.get_response_time_percentile(0.95) / 1000
     print(f"chat TTFT p95 = {p95_s:.2f}s (target < {TTFT_TARGET_S}s) over {ttft.num_requests} answers")
@@ -78,6 +82,7 @@ class ApiUser(HttpUser):
         token = _token
         started = time.perf_counter()
         first: float | None = None
+        completed = False
         with self.client.post(
             "/v1/chat",
             json={"message": question},
@@ -85,6 +90,7 @@ class ApiUser(HttpUser):
             stream=True,
             catch_response=True,
             name="/v1/chat (until headers)",
+            timeout=(10, 120),
         ) as r:
             if r.status_code != 200:
                 self._reauth_if_expired(r.status_code, token)
@@ -100,9 +106,10 @@ class ApiUser(HttpUser):
                         r.failure("SSE error event")
                         return
                 elif raw.startswith("data: ") and event == "done":
+                    completed = True
                     break
-            if first is None:
-                r.failure("No text streamed")
+            if first is None or not completed:
+                r.failure("Chat stream ended without text and a done event")
                 return
             r.success()
         done = time.perf_counter()

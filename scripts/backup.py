@@ -14,12 +14,13 @@ compose command (default: "podman compose").
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import shlex
 import subprocess
 import sys
-import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,23 +28,23 @@ from typing import Any
 import boto3
 import httpx
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from rag.core.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRATCH_DB = "rag_restore_check"
 COMPOSE = shlex.split(os.environ.get("COMPOSE", "podman compose"))
 
 
 def _db_name() -> str:
-    name = get_settings().database_url.rsplit("/", 1)[1].split("?", 1)[0]
+    name = make_url(get_settings().database_url).database or ""
     if not name.replace("_", "").isalnum():
         raise SystemExit(f"Unexpected database name {name!r}")
     return name
 
 
-def _pg(cmd: str, *, stdin: Path | None = None, stdout: Path | None = None) -> None:
+def _pg(cmd: str, *, stdin: Path | None = None, stdout: Path | None = None) -> bytes:
     """Runs a shell command in the postgres container, where POSTGRES_USER is set."""
     with (
         open(stdin, "rb") if stdin else open(os.devnull, "rb") as fin,
@@ -53,12 +54,60 @@ def _pg(cmd: str, *, stdin: Path | None = None, stdout: Path | None = None) -> N
             [*COMPOSE, "exec", "-T", "postgres", "sh", "-c", cmd],
             cwd=ROOT,
             stdin=fin,
-            stdout=fout,
+            stdout=fout if stdout else subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
     if proc.returncode != 0:
         raise SystemExit(f"postgres command failed: {proc.stderr.decode(errors='replace').strip()}")
+    return proc.stdout or b""
+
+
+async def _check_pg_target() -> None:
+    """The host URL and Compose tools must address the same cluster before any write or dump."""
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        async with engine.connect() as conn:
+            expected = str((await conn.execute(text("SELECT system_identifier FROM pg_control_system()"))).scalar_one())
+        actual = await asyncio.to_thread(
+            _pg,
+            f'psql -U "$POSTGRES_USER" -d {_db_name()} -Atc "SELECT system_identifier FROM pg_control_system()"',  # noqa: S608 - validated database name
+        )
+        if actual.decode().strip() != expected:
+            raise SystemExit("DATABASE_URL and Compose postgres refer to different clusters; refusing to continue")
+    finally:
+        await engine.dispose()
+
+
+def _checksum(path: Path) -> str:
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def _artifact(src: Path, relative: str) -> Path:
+    path = src / relative
+    if src.resolve() not in path.resolve().parents:
+        raise SystemExit(f"Unsafe backup path {relative!r}")
+    return path
+
+
+def _validate_backup(src: Path, manifest: dict[str, Any]) -> None:
+    checksums = manifest.get("sha256")
+    if not checksums:
+        raise SystemExit("Backup has no integrity manifest; create a new backup before restoring")
+    required = {manifest["postgres"]["file"], manifest["qdrant"]["file"]}
+    if objects := manifest.get("objects"):
+        root = _artifact(src, objects["dir"])
+        files = [p for p in root.rglob("*") if p.is_file()]
+        if (len(files), sum(p.stat().st_size for p in files)) != (objects["count"], objects["bytes"]):
+            raise SystemExit("Backup object inventory does not match the manifest")
+        required.update(p.relative_to(src).as_posix() for p in files)
+    if set(checksums) != required:
+        raise SystemExit("Backup integrity manifest does not match the artifact inventory")
+    for relative, expected in checksums.items():
+        path = _artifact(src, relative)
+        if not path.is_file() or _checksum(path) != expected:
+            raise SystemExit(f"Backup artifact missing or corrupted: {relative}")
 
 
 async def _table_counts(conn: AsyncConnection) -> dict[str, int]:
@@ -128,7 +177,8 @@ def _local_objects(root: Path) -> tuple[int, int]:
 
 async def backup(out: Path, skip_objects: bool) -> None:
     s = get_settings()
-    out.mkdir(parents=True, exist_ok=False)  # noqa: ASYNC240 - one-off CLI, nothing else runs on this loop
+    await _check_pg_target()
+    out.mkdir(mode=0o700, parents=True, exist_ok=False)  # noqa: ASYNC240 - one-off CLI
     manifest: dict[str, Any] = {"created_at": datetime.now(UTC).isoformat()}
 
     engine = create_async_engine(s.database_url)
@@ -184,6 +234,7 @@ async def backup(out: Path, skip_objects: bool) -> None:
         manifest["objects"] = {"bucket": s.s3_bucket, "dir": "objects", "count": count, "bytes": size}
         print(f"objects: {count} files, {size} bytes")
 
+    manifest["sha256"] = {p.relative_to(out).as_posix(): _checksum(p) for p in out.rglob("*") if p.is_file()}  # noqa: ASYNC240
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"backup written to {out}")
 
@@ -194,20 +245,23 @@ async def backup(out: Path, skip_objects: bool) -> None:
 async def verify(src: Path) -> bool:
     s = get_settings()
     manifest = json.loads((src / "manifest.json").read_text())
+    _validate_backup(src, manifest)
+    await _check_pg_target()
     ok: bool = True
 
-    admin_url = s.database_url.rsplit("/", 1)[0] + "/postgres"
+    scratch_db = f"rag_restore_check_{uuid.uuid4().hex}"
+    url = make_url(s.database_url)
+    admin_url = url.set(database="postgres").render_as_string(hide_password=False)
     admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     async with admin.connect() as conn:
-        await conn.execute(text(f"DROP DATABASE IF EXISTS {SCRATCH_DB} WITH (FORCE)"))
-        await conn.execute(text(f"CREATE DATABASE {SCRATCH_DB}"))
+        await conn.execute(text(f"CREATE DATABASE {scratch_db}"))
     try:
         await asyncio.to_thread(
             _pg,
-            f'pg_restore -U "$POSTGRES_USER" -d {SCRATCH_DB} --no-owner --exit-on-error',
+            f'pg_restore -U "$POSTGRES_USER" -d {scratch_db} --no-owner --exit-on-error',
             stdin=src / manifest["postgres"]["file"],
         )
-        scratch = create_async_engine(s.database_url.rsplit("/", 1)[0] + f"/{SCRATCH_DB}")
+        scratch = create_async_engine(url.set(database=scratch_db))
         async with scratch.connect() as conn:
             restored = await _table_counts(conn)
         await scratch.dispose()
@@ -218,11 +272,11 @@ async def verify(src: Path) -> bool:
         print(f"postgres: {'OK' if not diff else f'MISMATCH {diff}'} ({sum(restored.values())} rows)")
     finally:
         async with admin.connect() as conn:
-            await conn.execute(text(f"DROP DATABASE IF EXISTS {SCRATCH_DB} WITH (FORCE)"))
+            await conn.execute(text(f"DROP DATABASE {scratch_db} WITH (FORCE)"))
         await admin.dispose()
 
     qd = manifest["qdrant"]
-    scratch_collection = f"restore_check_{int(time.time())}"
+    scratch_collection = f"restore_check_{uuid.uuid4().hex}"
     with _qdrant() as q:
         try:
             _qdrant_upload(q, scratch_collection, src / qd["file"])
@@ -249,6 +303,8 @@ async def verify(src: Path) -> bool:
 async def restore(src: Path) -> None:
     s = get_settings()
     manifest = json.loads((src / "manifest.json").read_text())
+    _validate_backup(src, manifest)
+    await _check_pg_target()
     await asyncio.to_thread(
         _pg,
         f'pg_restore -U "$POSTGRES_USER" -d {_db_name()} --clean --if-exists --no-owner --single-transaction',

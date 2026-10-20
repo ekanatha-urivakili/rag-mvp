@@ -333,7 +333,7 @@ chunks           (id, document_id, version, chunk_index, text, heading_path,
 -- Background work
 jobs             (id, type[ingest_document|send_email|reindex|purge_document|judge_answer], payload JSONB,
                   status[queued|running|done|failed], attempts, run_after,
-                  locked_at, error, created_at)
+                  locked_at, finished_at, error, created_at)
 
 -- Chat
 conversations    (id, tenant_id, user_id, title, created_at, updated_at)
@@ -588,7 +588,7 @@ sequenceDiagram
 - **Traces** (OpenTelemetry, OTLP/HTTP; on when `OTEL_EXPORTER_OTLP_ENDPOINT` is set): one trace per request with a span per graph node (`rag.node.*`) and per LLM attempt (`llm.complete`/`llm.stream` with `gen_ai.*` provider, model and token attributes, outcome and route position), plus one span per worker job. Spans carry identifiers, scores and token counts, never prompts or document text. `trace_id` is on every JSON log line and stored on each assistant message. Per-message SSE spans are suppressed so a streamed answer is one span.
 - **Per message** (Postgres): provider, model, `fallback_used`, prompt version, tokens, latency, and in dev the graph path and rerank scores.
 - **Metrics** (`GET /metrics`, Prometheus): `http_requests_total` / `http_request_duration_seconds` by route template; `llm_requests_total{purpose,provider,model,outcome}`, `llm_request_duration_seconds`, `llm_tokens_total`, `llm_fallback_total{purpose,from,to}` (`to="none"` = route exhausted); `rag_time_to_first_token_seconds`, `rag_answer_duration_seconds`, `rag_answers_total{outcome}` (answered, direct, insufficient_context, error), `rag_top_rerank_score`, `rag_retrieval_degraded_total{kind}`, `rag_feedback_total{rating}`. Job backlog/age/terminal failures and 24 h online faithfulness/relevancy are read from Postgres at scrape time, so every replica reports the same values (aggregate with `max`).
-- **Dashboards/alerts** (`ops/`): API down, 5xx ratio, p95 TTFT > 3 s, chat error rate, **fallback rate per route** (rising = Ollama or a provider is unhealthy), exhausted routes, `insufficient_context` rate, thumbs-down rate, job failures and stale backlog, online faithfulness < 0.90. Each alert maps to a [runbook](RUNBOOKS.md).
+- **Dashboards/alerts** (`ops/`): API down, 5xx ratio (excluding health checks and scrapes), p95 TTFT > 3 s, chat error rate, **fallback rate per route** (rising = Ollama or a provider is unhealthy), exhausted routes, `insufficient_context` rate, thumbs-down rate, job failures by completion time and stale backlog, online faithfulness < 0.90. Each alert maps to a [runbook](RUNBOOKS.md). The local profile evaluates rules only; notification delivery requires a separately configured Alertmanager and receivers.
 
 ### 5.4 Evaluation
 

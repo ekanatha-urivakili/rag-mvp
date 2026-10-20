@@ -38,6 +38,7 @@ class RAGState(TypedDict, total=False):
     user_id: str
     conversation_id: str
     question: str
+    question_message_id: str
     history: list[ChatTurn]
     filters: dict[str, str]
     standalone_query: str

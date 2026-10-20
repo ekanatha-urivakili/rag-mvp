@@ -2,6 +2,7 @@
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any, ClassVar
 
 import httpx
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from rag.adapters.llm import router as router_mod
 from rag.api.routers import chat as chat_router
 from rag.core.config import get_settings
-from rag.db.models import AnswerEval, Chunk, Document, Job
+from rag.db.models import AnswerEval, Chunk, Conversation, Document, Job, Message
 from rag.db.session import get_sessionmaker
 from rag.domain.models import Citation, ScoredChunk
 from rag.evaluation import judge as judge_mod
@@ -38,6 +39,7 @@ async def test_metrics_token_required_when_configured(
     monkeypatch.setattr(get_settings(), "metrics_token", SecretStr("scrape-secret"))
     assert (await client.get("/metrics")).status_code == 401
     assert (await client.get("/metrics", headers={"Authorization": "Bearer wrong"})).status_code == 401
+    assert (await client.get("/metrics", headers={"Authorization": "scrape-secret"})).status_code == 401
     assert (await client.get("/metrics", headers={"Authorization": "Bearer scrape-secret"})).status_code == 200
 
 
@@ -114,17 +116,33 @@ async def test_sampled_answer_is_judged_off_the_hot_path(
 
     async with get_sessionmaker()() as db:
         job = (await db.execute(select(Job).where(Job.type == "judge_answer"))).scalar_one()
+        answer = await db.get(Message, uuid.UUID(job.payload["message_id"]))
+        db.add(
+            Message(
+                conversation_id=answer.conversation_id,
+                role="user",
+                content="Overlapping unrelated question",
+                citations=[],
+                created_at=answer.created_at - timedelta(microseconds=1),
+            )
+        )
+        await db.commit()
     assert job.payload["chunks"] == [[str(_CitedGraph.doc.id), 1, 0], [str(_CitedGraph.doc.id), 1, 1]]
 
     seen: dict[str, str] = {}
+    calls = 0
 
     async def fake_judge(context: str, question: str, answer: str) -> tuple[Judgement, str, str]:
+        nonlocal calls
+        calls += 1
         seen.update(context=context, question=question, answer=answer)
         return Judgement(faithfulness=0.75, relevancy=1.0), "openai", "judge-m"
 
     monkeypatch.setattr(judge_mod, "judge", fake_judge)
     async with get_sessionmaker()() as db:
         await judge_answer(db, job.payload)
+        await judge_answer(db, job.payload)
+    assert calls == 1
     assert seen["question"] == "How much leave?" and seen["answer"] == "Leave is 20 days [1]."
     assert seen["context"].index("Annual leave") < seen["context"].index("Sick leave")  # citation order kept
 
@@ -155,14 +173,62 @@ async def test_judge_skips_when_a_source_was_deleted(tenant: Account, monkeypatc
 
     monkeypatch.setattr(judge_mod, "judge", must_not_run)
     async with get_sessionmaker()() as db:
-        from rag.db.models import Conversation, Message
-
         conv = Conversation(id=uuid.uuid4(), tenant_id=tenant.tenant_id, user_id=tenant.user_id, title="t")
         db.add(conv)
         await db.flush()
-        db.add(Message(conversation_id=conv.id, role="user", content="q", citations=[]))
+        question_id = uuid.uuid4()
+        db.add(Message(id=question_id, conversation_id=conv.id, role="user", content="q", citations=[]))
         answer = Message(id=uuid.uuid4(), conversation_id=conv.id, role="assistant", content="a [2]", citations=[])
         db.add(answer)
         await db.commit()
-        await judge_answer(db, {"message_id": str(answer.id), "chunks": [[str(doc.id), 1, 0], [str(doc.id), 1, 1]]})
+        await judge_answer(
+            db,
+            {
+                "message_id": str(answer.id),
+                "question_message_id": str(question_id),
+                "chunks": [[str(doc.id), 1, 0], [str(doc.id), 1, 1]],
+            },
+        )
         assert (await db.execute(select(AnswerEval))).first() is None
+
+
+async def test_judge_does_not_send_soft_deleted_sources(tenant: Account, monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = await _document_with_chunks(tenant, ["private document"])
+
+    async def must_not_run(*_: str) -> None:
+        raise AssertionError("deleted content sent to judge")
+
+    monkeypatch.setattr(judge_mod, "judge", must_not_run)
+    async with get_sessionmaker()() as db:
+        conv = Conversation(id=uuid.uuid4(), tenant_id=tenant.tenant_id, user_id=tenant.user_id, title="t")
+        db.add(conv)
+        await db.flush()
+        question = Message(id=uuid.uuid4(), conversation_id=conv.id, role="user", content="q", citations=[])
+        answer = Message(id=uuid.uuid4(), conversation_id=conv.id, role="assistant", content="a [1]", citations=[])
+        db.add_all([question, answer])
+        document = await db.get(Document, doc.id)
+        document.status = "deleted"
+        await db.commit()
+        await judge_answer(
+            db,
+            {
+                "message_id": str(answer.id),
+                "question_message_id": str(question.id),
+                "chunks": [[str(doc.id), 1, 0]],
+            },
+        )
+        assert (await db.execute(select(AnswerEval))).first() is None
+
+
+async def test_old_job_failing_now_is_in_failure_window(client: httpx.AsyncClient) -> None:
+    from sqlalchemy import text
+
+    from rag.worker.loop import _fail
+
+    async with get_sessionmaker()() as db:
+        job = enqueue(db, "reindex", {})
+        await db.commit()
+        await db.execute(text("UPDATE jobs SET created_at = now() - interval '2 days' WHERE id = :id"), {"id": job.id})
+        await db.commit()
+        await _fail(db, str(job.id), "reindex", {}, get_settings().job_max_attempts, RuntimeError("failed"))
+    assert 'jobs_failed_24h{type="reindex"} 1.0' in (await client.get("/metrics")).text

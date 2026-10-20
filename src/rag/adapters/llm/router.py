@@ -22,7 +22,7 @@ from rag.adapters.llm.openai import OpenAILLM
 from rag.core.config import Settings, get_settings
 from rag.core.errors import LLMUnavailable
 from rag.core.logging import log_extra
-from rag.core.metrics import LLM_FALLBACK, LLM_LATENCY, LLM_REQUESTS, LLM_TOKENS
+from rag.core.metrics import LLM_FALLBACK, LLM_LATENCY, LLM_REQUESTS, LLM_ROUTE_EXHAUSTED_AT, LLM_TOKENS
 from rag.core.telemetry import tracer
 
 log = logging.getLogger(__name__)
@@ -55,6 +55,8 @@ class FallbackLLM:
     def _fell_back(self, i: int, entry: RouteEntry, err: BaseException) -> None:
         nxt = self._entries[i + 1][0].provider if i + 1 < len(self._entries) else "none"
         LLM_FALLBACK.labels(self.purpose, entry.provider, nxt).inc()
+        if nxt == "none":
+            LLM_ROUTE_EXHAUSTED_AT.labels(self.purpose).set(time.time())
         log.warning(
             "llm_fallback",
             extra=log_extra(
@@ -124,17 +126,17 @@ class FallbackLLM:
             span = tracer.start_span("llm.stream", attributes=self._attrs(entry, i))
             t0 = time.perf_counter()
             it = llm.stream(messages, max_tokens=max_tokens).__aiter__()
+            usage = None
             try:
-                # Fallback is only possible before the first token reaches the client.
-                async with asyncio.timeout(entry.timeout_s):
-                    first = await it.__anext__()
-            except Exception as e:
-                self._observe(entry, "error", t0, span)
-                span.end()
-                self._fell_back(i, entry, e)
-                continue
-            usage = first.usage
-            try:
+                try:
+                    # Fallback is only possible before the first event reaches the client.
+                    async with asyncio.timeout(entry.timeout_s):
+                        first = await it.__anext__()
+                except Exception as e:
+                    self._observe(entry, "error", t0, span)
+                    self._fell_back(i, entry, e)
+                    continue
+                usage = first.usage
                 first.provider, first.model, first.fallback_used = llm.provider, llm.model, i > 0
                 yield first
                 async with asyncio.timeout(entry.timeout_s):
@@ -150,6 +152,8 @@ class FallbackLLM:
                 self._observe(entry, "ok", t0, span, usage)
             finally:
                 span.end()
+                if close := getattr(it, "aclose", None):
+                    await close()
             return
         raise LLMUnavailable(f"All providers failed for route '{self.purpose}'")
 

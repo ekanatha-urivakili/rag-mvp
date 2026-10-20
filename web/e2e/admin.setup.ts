@@ -19,8 +19,8 @@ setup("sign up and verify a new workspace admin", async ({ page, request }) => {
   await page.goto(await emailLink(request, account.email, "verify_signup"));
   await expect(page).toHaveURL(/\/verify_signup$/); // token stripped from the address bar
   await page.getByLabel("Workspace name").fill(account.workspace);
-  await page.getByLabel("Password (12–128 characters)").fill(account.password);
-  await page.getByLabel("Repeat password").fill(account.password);
+  await page.getByLabel("Password (12–128 characters)", { exact: true }).fill(account.password);
+  await page.getByLabel("Repeat password", { exact: true }).fill(account.password);
   await page.getByRole("button", { name: "Create account" }).click();
 
   await expect(page).toHaveURL(/\/$/);

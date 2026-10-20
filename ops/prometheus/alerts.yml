@@ -11,7 +11,8 @@ groups:
 
       - alert: ApiErrorRateHigh
         expr: |
-          sum(rate(http_requests_total{status=~"5.."}[10m])) / clamp_min(sum(rate(http_requests_total[10m])), 1e-9) > 0.02
+          sum(rate(http_requests_total{job="rag-api",route!~"/metrics|/healthz|/readyz",status=~"5.."}[10m]))
+            / clamp_min(sum(rate(http_requests_total{job="rag-api",route!~"/metrics|/healthz|/readyz"}[10m])), 1e-9) > 0.02
         for: 10m
         labels: { severity: page }
         annotations: { summary: "More than 2% of API requests return 5xx" }
@@ -39,7 +40,7 @@ groups:
         annotations: { summary: "Route {{ $labels.purpose }} falls back on more than 5% of calls" }
 
       - alert: LlmRouteExhausted
-        expr: sum by (purpose) (increase(llm_fallback_total{to="none"}[10m])) > 0
+        expr: time() - max by (purpose) (llm_route_exhausted_timestamp_seconds) < 600
         labels: { severity: page }
         annotations: { summary: "Every provider failed for route {{ $labels.purpose }}" }
 

@@ -88,7 +88,8 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
         )
     ).all()
     history = [ChatTurn(role=r.role, content=r.content) for r in reversed(recent)]
-    db.add(Message(conversation_id=conv.id, role="user", content=body.message))
+    question_id = uuid.uuid4()
+    db.add(Message(id=question_id, conversation_id=conv.id, role="user", content=body.message))
     await db.commit()
 
     filters = {"doc_id": str(body.filters.doc_id)} if body.filters and body.filters.doc_id else None
@@ -97,6 +98,7 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
         "user_id": str(ctx.user_id),
         "conversation_id": str(conv.id),
         "question": body.message,
+        "question_message_id": str(question_id),
         "history": history,
         "filters": filters or {},
         "path": [],
@@ -118,7 +120,7 @@ def _outcome(path: list[str], answer: str) -> str:
     return "answered"
 
 
-def _maybe_judge(db: AsyncSession, final: dict[str, Any], message_id: uuid.UUID) -> None:
+def _maybe_judge(db: AsyncSession, final: dict[str, Any], message_id: uuid.UUID, question_id: str) -> None:
     """Queue a sampled, asynchronous faithfulness check (§4.2): off the hot path, same transaction as the answer."""
     rate = get_settings().online_eval_sample_rate
     if not final.get("citations") or rate <= 0 or random.random() >= rate:  # noqa: S311
@@ -128,7 +130,7 @@ def _maybe_judge(db: AsyncSession, final: dict[str, Any], message_id: uuid.UUID)
     if not get_router().has_provider("eval_judge"):
         return
     refs = [[c.doc_id, c.doc_version, c.chunk_index] for c in final.get("chunks", [])]
-    enqueue(db, "judge_answer", {"message_id": str(message_id), "chunks": refs})
+    enqueue(db, "judge_answer", {"message_id": str(message_id), "question_message_id": question_id, "chunks": refs})
 
 
 async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, started: float) -> AsyncIterator[str]:
@@ -201,7 +203,7 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, start
         )
         db.add(msg)
         await db.flush()
-        _maybe_judge(db, final, msg.id)
+        _maybe_judge(db, final, msg.id, state["question_message_id"])
         await db.execute(update(Conversation).where(Conversation.id == conversation_id).values(updated_at=func.now()))
         await db.commit()
     ANSWERS.labels(_outcome(debug["path"], msg.content)).inc()

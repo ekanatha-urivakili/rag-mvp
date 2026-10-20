@@ -1,0 +1,49 @@
+rule_files: [alerts.yml]
+evaluation_interval: 30s
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'llm_route_exhausted_timestamp_seconds{job="rag-api",purpose="generation"}'
+        values: '60x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LlmRouteExhausted
+        exp_alerts:
+          - exp_labels: {purpose: generation, severity: page}
+            exp_annotations: {summary: "Every provider failed for route generation"}
+      - eval_time: 20m
+        alertname: LlmRouteExhausted
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="rag-api",method="POST",route="/v1/chat",status="500"}'
+        values: '0+1x30'
+      - series: 'http_requests_total{job="rag-api",method="POST",route="/v1/chat",status="200"}'
+        values: '0+19x30'
+      - series: 'http_requests_total{job="rag-api",method="GET",route="/healthz",status="200"}'
+        values: '0+1000x30'
+      - series: 'http_requests_total{job="rag-api",method="GET",route="/metrics",status="200"}'
+        values: '0+1000x30'
+      - series: 'http_requests_total{job="unrelated",method="GET",route="/",status="200"}'
+        values: '0+1000x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApiErrorRateHigh
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations: {summary: "More than 2% of API requests return 5xx"}
+
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="rag-api",method="GET",route="/v1/me",status="200"}'
+        values: '0+100x30'
+      - series: 'http_requests_total{job="rag-api",method="GET",route="/readyz",status="503"}'
+        values: '0+1000x30'
+      - series: 'http_requests_total{job="unrelated",method="GET",route="/",status="500"}'
+        values: '0+1000x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApiErrorRateHigh
+        exp_alerts: []

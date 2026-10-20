@@ -9,6 +9,15 @@ permissions:
   contents: read
 
 jobs:
+  observability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Prometheus config and alert regressions
+        run: |
+          docker run --rm --network none --entrypoint promtool -v "$PWD/ops/prometheus:/etc/prometheus:ro" prom/prometheus:latest check config /etc/prometheus/prometheus.yml
+          docker run --rm --network none --entrypoint promtool -v "$PWD/ops/prometheus:/etc/prometheus:ro" prom/prometheus:latest test rules /etc/prometheus/alerts.test.yml
+
   checks:
     runs-on: ubuntu-latest
     services:
@@ -51,6 +60,9 @@ jobs:
       - run: uv run ruff format --check src tests ui evals scripts loadtest
       - run: uv run mypy src
       - run: uv run pytest -q
+      - run: uv run --with locust==2.46.7 python -m pytest -q loadtest/test_gate.py
+        env:
+          LOCUST_SKIP_MONKEY_PATCH: "1"
       - name: Dependency vulnerability audit (OWASP A06)
         shell: bash
         run: uvx --python 3.12 pip-audit --strict --disable-pip --no-deps -r <(uv export --no-dev --no-hashes --frozen --no-emit-project)

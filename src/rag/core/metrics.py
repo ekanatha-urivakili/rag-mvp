@@ -20,6 +20,9 @@ LLM_LATENCY = Histogram(
 )
 LLM_TOKENS = Counter("llm_tokens_total", "LLM tokens", ["purpose", "provider", "model", "direction"])
 LLM_FALLBACK = Counter("llm_fallback_total", "Route fell through to the next provider", ["purpose", "from", "to"])
+LLM_ROUTE_EXHAUSTED_AT = Gauge(
+    "llm_route_exhausted_timestamp_seconds", "Unix time of the latest exhausted route", ["purpose"]
+)
 
 # outcome: answered | direct | insufficient_context | error
 ANSWERS = Counter("rag_answers_total", "Chat turns by outcome", ["outcome"])
@@ -57,7 +60,7 @@ async def _refresh_db_gauges(db: AsyncSession) -> None:
     rows = await db.execute(
         text(
             "SELECT type, count(*) AS n FROM jobs "
-            "WHERE status = 'failed' AND created_at > now() - interval '24 hours' GROUP BY type"
+            "WHERE status = 'failed' AND finished_at > now() - interval '24 hours' GROUP BY type"
         )
     )
     for r in rows:
