@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, sendJson } from "@/lib/client";
 import { Alert, Button, Field } from "@/components/ui";
@@ -31,13 +30,12 @@ function fields(e: FormEvent<HTMLFormElement>): Record<string, string> {
   return Object.fromEntries([...new FormData(e.currentTarget)].map(([k, v]) => [k, String(v)]));
 }
 
-/** After sign-in, re-render server components with the new session cookie. */
+/**
+ * After sign-in, load the app with a full navigation. A client-side navigation can reuse the router's
+ * prefetch of "/" made while signed out, which is a cached redirect back to /login.
+ */
 function useEnterApp() {
-  const router = useRouter();
-  return () => {
-    router.replace("/");
-    router.refresh();
-  };
+  return () => window.location.replace("/");
 }
 
 /** Email links carry ?token=…; drop it from the address bar and history as soon as the page loads. */
