@@ -35,7 +35,10 @@ def setup_tracing(settings: Settings, service: str, app: FastAPI | None = None) 
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     if app is not None:
-        FastAPIInstrumentor.instrument_app(app, excluded_urls="healthz,readyz,metrics", tracer_provider=provider)
+        # No per-message ASGI spans: an SSE answer would otherwise emit one span per token.
+        FastAPIInstrumentor.instrument_app(
+            app, excluded_urls="healthz,readyz,metrics", tracer_provider=provider, exclude_spans=["receive", "send"]
+        )
 
 
 def current_trace_id() -> str | None:
