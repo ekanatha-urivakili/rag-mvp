@@ -321,7 +321,7 @@ The features above are implemented. SSO/OIDC, custom roles, per-document ACLs, G
 
 1. Checks that Podman is installed and running. On macOS it starts the Podman machine if it's stopped.
 2. Creates `.env` from `.env.example` with generated secrets if it doesn't exist yet.
-3. Checks that the ports are free. For a normal launch, starts an installed Ollama server on localhost if needed, pulls missing local models, and warms the chat model. Test-only runs just check Ollama availability.
+3. Checks that the ports are free. If one is taken by something outside the project, it stops that container or process (browsers and Podman itself are never stopped). For a normal launch, starts an installed Ollama server on localhost if needed, pulls missing local models, and warms the chat model. Test-only runs just check Ollama availability.
 4. Starts Postgres, Qdrant, RustFS and Mailpit, and waits for them to be healthy.
 5. Runs ruff, strict mypy, and the full unit + integration suite, then the web UI's lint, typecheck, format check and unit tests (if `npm` is installed).
 6. Builds the images, starts the API, worker and web UI, waits for health, and opens the web UI in your browser.

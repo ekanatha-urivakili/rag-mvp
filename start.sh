@@ -110,15 +110,55 @@ PG_PORT="${POSTGRES_HOST_PORT:-5432}"
 ports=("$PG_PORT" 6333 9000 "${MAILPIT_SMTP_PORT:-1025}" "${MAILPIT_UI_PORT:-8025}")
 [[ "$mode" == all ]] && ports+=(8000 3000)
 ours=$(podman ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Ports}}' 2>/dev/null || true)
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# Frees a port held by something outside this project: other Podman containers are stopped,
+# other processes are terminated. Browsers and the container runtime itself are never killed.
+free_port() {
+  local port=$1 containers pids pid cmd
+  # Podman collapses adjacent ports into ranges, e.g. 127.0.0.1:6333-6334->6333-6334/tcp.
+  containers=$(podman ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -E ":${port}(-[0-9]+)?->" | cut -d' ' -f1 || true)
+  if [[ -n "$containers" ]]; then
+    warn "Stopping container(s) on port ${port}: $(tr '\n' ' ' <<<"$containers")"
+    # shellcheck disable=SC2086
+    podman stop $containers >/dev/null
+  else
+    command -v lsof >/dev/null || { warn "lsof is not installed; can't find what owns port ${port}"; return 1; }
+    pids=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
+    [[ -n "$pids" ]] || { warn "Can't see the owner of port ${port} (another user's process?)"; return 1; }
+    for pid in $pids; do
+      cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      if grep -qiE 'firefox|chrome|chromium|gvproxy|podman|vfkit|docker' <<<"$cmd"; then
+        warn "Port ${port} is used by ${cmd##*/} (pid ${pid}); not stopping it"
+        return 1
+      fi
+    done
+    for pid in $pids; do
+      cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      warn "Stopping ${cmd##*/} (pid ${pid}) on port ${port}"
+      kill "$pid" 2>/dev/null || true
+    done
+    local deadline=$((SECONDS + 5))
+    while port_open "$port" && ((SECONDS < deadline)); do sleep 0.2; done
+    port_open "$port" && kill -9 $pids 2>/dev/null || true
+  fi
+  local deadline=$((SECONDS + 5))
+  while port_open "$port" && ((SECONDS < deadline)); do sleep 0.2; done
+  ! port_open "$port"
+}
+
 busy=0
 for port in "${ports[@]}"; do
-  # Podman collapses adjacent ports into ranges, e.g. 127.0.0.1:6333-6334->6333-6334/tcp.
   if grep -qE "127\.0\.0\.1:${port}(-[0-9]+)?->" <<<"$ours"; then
     continue
   fi
-  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+  if port_open "$port"; then
     warn "Port ${port} is already in use by another process or project"
-    busy=1
+    if free_port "$port"; then
+      ok "Freed port ${port}"
+    else
+      busy=1
+    fi
   fi
 done
 [[ "$busy" == 0 ]] || die "Free those ports, or set the overrides in .env (POSTGRES_HOST_PORT, MAILPIT_UI_PORT, MAILPIT_SMTP_PORT)."
