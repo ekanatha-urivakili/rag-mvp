@@ -39,6 +39,9 @@ compose() { podman compose "$@" 2> >(grep -v 'Executing external compose provide
 
 # --- Podman ---------------------------------------------------------------------
 step "Checking Podman"
+if ! command -v podman >/dev/null && [[ "$(uname -s)" == "Darwin" && -x /opt/podman/bin/podman ]]; then
+  export PATH="/opt/podman/bin:$PATH"
+fi
 command -v podman >/dev/null || die "Podman is not installed. Install it from https://podman.io and re-run."
 if ! podman info >/dev/null 2>&1; then
   if [[ "$(uname -s)" == "Darwin" || "$(uname -s)" == MINGW* ]] && podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then
@@ -121,16 +124,49 @@ done
 [[ "$busy" == 0 ]] || die "Free those ports, or set the overrides in .env (POSTGRES_HOST_PORT, MAILPIT_UI_PORT, MAILPIT_SMTP_PORT)."
 ok "Ports are free or already owned by ${PROJECT}"
 
-# --- Ollama (optional) ------------------------------------------------------------
+# --- Ollama -----------------------------------------------------------------------
 step "Checking Ollama"
-if tags=$(curl -sf -m 3 "${OLLAMA_BASE_URL:-http://localhost:11434}/api/tags"); then
+ollama_url="${OLLAMA_BASE_URL:-http://localhost:11434}"
+ollama_url="${ollama_url%/}"
+if [[ "$mode" == all ]] && ! curl -sf -m 3 "${ollama_url}/api/tags" >/dev/null; then
+  case "$ollama_url" in
+    http://localhost:11434|http://127.0.0.1:11434)
+      if command -v ollama >/dev/null; then
+        step "Starting Ollama on localhost (logs: .ollama.log)"
+        OLLAMA_HOST=127.0.0.1:11434 nohup ollama serve >.ollama.log 2>&1 </dev/null &
+        ollama_deadline=$((SECONDS + 30))
+        until curl -sf -m 3 "${ollama_url}/api/tags" >/dev/null; do
+          ((SECONDS < ollama_deadline)) || die "Ollama did not start; check .ollama.log"
+          sleep 1
+        done
+      fi
+      ;;
+  esac
+fi
+if tags=$(curl -sf -m 3 "${ollama_url}/api/tags"); then
   ok "Ollama is reachable"
   for model in qwen3.5:4b bge-m3 "${OLLAMA_VISION_MODEL:-qwen3-vl:latest}"; do
-    grep -q "\"${model%%:latest}" <<<"$tags" || warn "Model ${model} is not pulled: ollama pull ${model}"
+    model_tag="$model"
+    [[ "$model_tag" == *:* ]] || model_tag="${model_tag}:latest"
+    if ! grep -Fq "\"${model_tag}\"" <<<"$tags"; then
+      if [[ "$mode" == all ]] && command -v ollama >/dev/null; then
+        step "Pulling Ollama model ${model}"
+        OLLAMA_HOST="$ollama_url" ollama pull "$model"
+      else
+        warn "Model ${model} is not pulled: ollama pull ${model}"
+      fi
+    fi
   done
+  if [[ "$mode" == all ]]; then
+    step "Warming local chat model"
+    curl -sf --max-time 120 -H 'Content-Type: application/json' \
+      -d '{"model":"qwen3.5:4b","keep_alive":"30m","stream":false}' \
+      "${ollama_url}/api/generate" >/dev/null || die "Could not warm qwen3.5:4b; check Ollama logs"
+    ok "Local chat model is loaded"
+  fi
 else
   warn "Ollama is not reachable. Tests still run, but local chat, embeddings and receipt extraction need it:"
-  warn "  OLLAMA_HOST=0.0.0.0 ollama serve   (see README, 'Ollama and containers')"
+  warn "  Install Ollama, or start the server configured by OLLAMA_BASE_URL (see README, 'Ollama and containers')"
 fi
 
 # --- Infrastructure ---------------------------------------------------------------

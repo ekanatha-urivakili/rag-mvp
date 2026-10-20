@@ -321,7 +321,7 @@ The features above are implemented. SSO/OIDC, custom roles, per-document ACLs, G
 
 1. Checks that Podman is installed and running. On macOS it starts the Podman machine if it's stopped.
 2. Creates `.env` from `.env.example` with generated secrets if it doesn't exist yet.
-3. Checks that the ports are free, and warns if Ollama or its models are missing.
+3. Checks that the ports are free. For a normal launch, starts an installed Ollama server on localhost if needed, pulls missing local models, and warms the chat model. Test-only runs just check Ollama availability.
 4. Starts Postgres, Qdrant, RustFS and Mailpit, and waits for them to be healthy.
 5. Runs ruff, strict mypy, and the full unit + integration suite, then the web UI's lint, typecheck, format check and unit tests (if `npm` is installed).
 6. Builds the images, starts the API, worker and web UI, waits for health, and opens the web UI in your browser.
@@ -351,13 +351,13 @@ podman compose exec api rag admin create --email you@example.com --tenant demo  
 **Local models.** Chat, embeddings and receipt extraction default to Ollama on the host. Tests don't need it.
 
 ```bash
-OLLAMA_HOST=0.0.0.0 ollama serve
+OLLAMA_HOST=127.0.0.1:11434 ollama serve
 ollama pull qwen3.5:4b && ollama pull bge-m3 && ollama pull qwen3-vl
 ```
 
 Add `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` to `.env` to enable the cloud routes.
 
-**Ollama and containers.** Ollama runs on the host so it can use the Metal GPU. Containers reach it through `host.containers.internal`, which only works when Ollama listens on all interfaces. That also exposes Ollama, which has no authentication, to your LAN. Keep the macOS firewall on, or use a cloud `orchestration` route instead.
+**Ollama and containers.** Ollama runs on the host so it can use the Metal GPU. Containers reach it through `host.containers.internal`; localhost binding is verified with this macOS Podman setup. `start.sh` starts the default localhost server when needed and writes its logs to `.ollama.log`. Other `OLLAMA_BASE_URL` addresses must already be running. The API warms the chat model before serving; the receipt vision model loads on demand. If your container runtime cannot reach the host's loopback listener, configure a private host interface reachable by the containers. Ollama has no authentication, so avoid exposing it to the LAN.
 
 ### Manual setup (Podman)
 

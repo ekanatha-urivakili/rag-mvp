@@ -43,3 +43,4 @@ Thumbs.db
 
 # Local Claude Code settings
 .claude/
+.ollama.log
