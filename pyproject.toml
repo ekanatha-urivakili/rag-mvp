@@ -27,13 +27,17 @@ dependencies = [
     "pymupdf4llm>=0.0.24",
     "python-docx>=1.1",
     "trafilatura>=2.0",
-    "pillow>=11.0",
+    "pillow>=13.0,<14",
     "rapidocr>=3.9",
     "tiktoken>=0.9",
     "boto3>=1.38",
     "aiosmtplib>=4.0",
     "jinja2>=3.1",
     "streamlit>=1.45",
+    "prometheus-client>=0.21",
+    "opentelemetry-sdk>=1.45",
+    "opentelemetry-exporter-otlp-proto-http>=1.45",
+    "opentelemetry-instrumentation-fastapi>=0.56b0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +52,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rag"]
+
+[tool.uv]
+# FastEmbed 0.8.1 caps Pillow below 13; the used BM25/reranker paths pass the model compatibility check.
+override-dependencies = ["pillow==13.0.0"]
 
 [tool.ruff]
 line-length = 120

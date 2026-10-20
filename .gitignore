@@ -43,4 +43,7 @@ Thumbs.db
 
 # Local Claude Code settings
 .claude/
+
+# Local backups (scripts/backup.py)
+backups/
 .ollama.log

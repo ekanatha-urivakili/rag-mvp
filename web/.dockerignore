@@ -2,3 +2,7 @@ node_modules
 .next
 .env*
 *.tsbuildinfo
+e2e
+playwright.config.ts
+playwright-report
+test-results

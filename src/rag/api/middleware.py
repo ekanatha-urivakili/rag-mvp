@@ -9,8 +9,10 @@ from starlette.types import ASGIApp
 
 from rag.core.config import get_settings
 from rag.core.logging import log_extra, request_id_var
+from rag.core.metrics import HTTP_LATENCY, HTTP_REQUESTS
 
 log = logging.getLogger("rag.access")
+_METHODS = {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "CONNECT"}
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):
@@ -24,6 +26,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         rid = uuid.uuid4().hex
         request_id_var.set(rid)
         t0 = time.perf_counter()
+        method = request.method if request.method in _METHODS else "OTHER"
         length = request.headers.get("content-length")
         response: Response
         if length is not None and (not length.isdigit() or int(length) > self._settings.max_request_body_bytes):
@@ -31,7 +34,13 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 {"error": {"code": "payload_too_large", "message": "Request body too large"}}, status_code=413
             )
         else:
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception:
+                route = getattr(request.scope.get("route"), "path", "unmatched")
+                HTTP_REQUESTS.labels(method, route, "500").inc()
+                HTTP_LATENCY.labels(method, route).observe(time.perf_counter() - t0)
+                raise
         h = response.headers
         h["X-Request-ID"] = rid
         h["X-Content-Type-Options"] = "nosniff"
@@ -52,13 +61,18 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         h.setdefault("Cache-Control", "no-store")
         if self._settings.is_prod:
             h["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        elapsed = time.perf_counter() - t0
+        # Route template, not the raw path: IDs in paths would explode label cardinality.
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        HTTP_REQUESTS.labels(method, route, str(response.status_code)).inc()
+        HTTP_LATENCY.labels(method, route).observe(elapsed)
         log.info(
             "request",
             extra=log_extra(
                 method=request.method,
                 path=request.url.path,
                 status=response.status_code,
-                ms=int((time.perf_counter() - t0) * 1000),
+                ms=int(elapsed * 1000),
             ),
         )
         return response

@@ -2,7 +2,7 @@
 
 ## 0. Review Notes
 
-Current implementation/security evidence: [principal review, 7 October 2026](PRINCIPAL_CODE_REVIEW.md). Performance targets below remain targets; the conditional eval CI job requires configured infrastructure and credentials.
+Implementation evidence: the test suites and checks listed in the [README](../README.md#tests-and-checks); operating procedures: [runbooks](RUNBOOKS.md). Performance targets below remain targets until measured on production-like hardware (§8, Phase 6); the conditional eval CI job requires configured infrastructure and credentials.
 
 ### Revision 2 — architecture review
 
@@ -33,6 +33,17 @@ Current implementation/security evidence: [principal review, 7 October 2026](PRI
 | --- | --- | --- | --- |
 | 14 | Keep a history of chats and continue any of them | `conversations.updated_at` (last activity) drives ordering; keyset-paginated, searchable history; rename and delete; deep links `/c/{id}`; posting to an existing conversation continues it with its last turns as context | §4.10 |
 | 15 | Next.js UI, built with the OWASP Web and API Top 10 in mind | Next.js App Router as a **backend-for-frontend (BFF)**: tokens only in an encrypted HttpOnly cookie, allowlisted server-side proxy to the API, Origin-checked mutations, per-request nonce CSP, no raw HTML rendering | §6 |
+
+### Revision 5 — Phase 6 hardening (20 October 2026)
+
+| # | Change | Design | Section |
+| --- | --- | --- | --- |
+| 16 | Metrics and alerts | Prometheus `/metrics` (token-protected; off in prod without a token) with per-attempt LLM metrics, `llm_fallback_total{purpose,from,to}`, TTFT, answer outcomes and Postgres-derived job/online-eval gauges; alert rules and a Grafana dashboard in `ops/` | §5.3 |
+| 17 | Tracing | OpenTelemetry over OTLP/HTTP, enabled by `OTEL_EXPORTER_OTLP_ENDPOINT`: one span per request, graph node, LLM attempt and worker job. Jaeger locally; Langfuse via its OTLP endpoint | §5.3 |
+| 18 | Online faithfulness | `judge_answer` job grades a sampled share of cited answers with the `eval_judge` route into `answer_evals`; off by default | §4.2, §5.4 |
+| 19 | Load, recovery, operations | Locust load test with a TTFT gate; backup/restore script with an automated restore test; runbooks | §8 |
+| 20 | Browser end-to-end tests | Playwright suite run in CI against API + worker + production web build | §6.1 |
+| 21 | No LangGraph checkpointer | The graph runs once per turn with history loaded from `messages`; a checkpointer would add a write per node with nothing to resume. Revisit for human-in-the-loop interrupts | §4.10, §9 |
 
 ---
 
@@ -69,14 +80,14 @@ Current implementation/security evidence: [principal review, 7 October 2026](PRI
 | Sparse / keyword | BM25 via `fastembed` (CPU, local) | Stored as Qdrant sparse vectors |
 | Reranker | `bge-reranker-v2-m3` (local cross-encoder) | Behind a `Reranker` protocol |
 | Vector DB | Qdrant | Native hybrid search + RRF fusion, payload indexes, multi-tenancy, horizontal scaling |
-| Relational DB | PostgreSQL 16 + SQLAlchemy 2 (async) + Alembic | Source of truth; job queue; LangGraph checkpointer |
+| Relational DB | PostgreSQL 16 + SQLAlchemy 2 (async) + Alembic | Source of truth; job queue; chat history |
 | Job queue | Postgres `jobs` table + `SELECT … FOR UPDATE SKIP LOCKED` worker | Ingestion, email, re-index jobs. No extra infra for MVP |
 | File storage | S3-compatible (MinIO locally) | Raw uploads, immutable |
 | Parsing | `pymupdf4llm` (PDF → Markdown), `python-docx`, `trafilatura` (HTML) | Add Docling/Unstructured later for complex layouts |
 | Auth | Email + password (`argon2id`), JWT access + rotating refresh tokens, API keys for service accounts | `pwdlib`/`argon2-cffi`, `pyjwt` |
 | Authorization | RBAC, 3 fixed roles per tenant, permissions in code | §4.7 |
 | Email | `aiosmtplib` + Jinja2 templates; **Mailpit** locally | Outbox via jobs table (§4.8) |
-| Observability | OpenTelemetry + Langfuse, structured JSON logs | Langfuse is an optional compose profile locally (it's heavy) |
+| Observability | OpenTelemetry (OTLP) traces, Prometheus metrics, structured JSON logs | Trace backend is any OTLP receiver: Jaeger in the local `observability` profile, Langfuse via its OTLP endpoint. Prometheus + Grafana in the same profile |
 | Evaluation | Retrieval metrics + RAGAS (faithfulness, answer relevancy) | |
 | UI | Next.js 16 (App Router) + React 19 + TypeScript, Tailwind CSS 4, TanStack Query | Runs as a BFF in front of the API (§6). Receipts, Members and Settings are implemented in Next.js; Streamlit is an optional legacy profile |
 | Containers | **Podman** (rootless) + Compose spec (`compose.yaml`) | Same OCI images in prod |
@@ -224,7 +235,7 @@ class RAGState(TypedDict):
     models_used: list[ModelUsage]    # provider, model, tokens, latency, fallback flag
 ```
 
-**Why no LLM Critic in the hot path?** It doubles latency and cost. Faithfulness is measured offline (eval suite, OpenAI judge) and on a sampled % of production traffic asynchronously. If eval shows hallucination problems, add an inline groundedness check behind a feature flag.
+**Why no LLM Critic in the hot path?** It doubles latency and cost. Faithfulness is measured offline (eval suite, OpenAI judge) and on a sampled % of production traffic asynchronously: when `ONLINE_EVAL_SAMPLE_RATE` > 0, a `judge_answer` job is queued in the same transaction as a cited answer; the worker reloads the exact chunks (by document, version and index, in citation order) and stores the grade in `answer_evals`. It is skipped if a source was deleted in between, since citation numbers would shift. If eval shows hallucination problems, add an inline groundedness check behind a feature flag.
 
 **Extending to multi-agent later:** new capabilities (SQL agent, web search, summarization) are added as subgraphs selected by `analyze_query`'s output, each with its own model route. The state contract and API do not change.
 
@@ -320,9 +331,9 @@ chunks           (id, document_id, version, chunk_index, text, heading_path,
                   page_start, page_end, token_count)
 
 -- Background work
-jobs             (id, type[ingest_document|send_email|reindex], payload JSONB,
+jobs             (id, type[ingest_document|send_email|reindex|purge_document|judge_answer], payload JSONB,
                   status[queued|running|done|failed], attempts, run_after,
-                  locked_at, error, created_at)
+                  locked_at, finished_at, error, created_at)
 
 -- Chat
 conversations    (id, tenant_id, user_id, title, created_at, updated_at)
@@ -332,6 +343,8 @@ messages         (id, conversation_id, role, content, citations JSONB, trace_id,
                   tokens_out, latency_ms, debug JSONB, created_at)
                   INDEX (conversation_id, created_at)             -- latest window + "load earlier"
 feedback         (message_id, user_id, rating SMALLINT, comment, created_at)
+answer_evals     (message_id PK → messages ON DELETE CASCADE, faithfulness, relevancy,
+                  judge_provider, judge_model, created_at)        -- sampled online grading
 ```
 
 All tokens (invite, reset, refresh, API key) are stored **hashed** (SHA-256 of a 32-byte random secret); the plaintext is shown/sent once.
@@ -388,6 +401,7 @@ Single collection with `tenant_id` partitioning; the filter is enforced inside t
 | `DELETE` | `/v1/conversations/{id}` | `chat:use` (own only) | Hard delete; messages and feedback cascade |
 | `POST` | `/v1/messages/{id}/feedback` | `chat:use` (own only) | `{rating, comment?}` |
 | `GET` | `/healthz`, `/readyz` | public | Readiness checks Postgres + Qdrant; reports Ollama reachability (degraded, not failed) |
+| `GET` | `/metrics` | `METRICS_TOKEN` bearer | Prometheus exposition. Without a token: open in dev/test, `404` in prod. Not proxied by the BFF |
 
 #### SSE events from `/v1/chat`
 
@@ -469,16 +483,20 @@ rag-mvp/
 ├── Containerfile               # one image; api / worker / ui chosen by command
 ├── .env.example
 ├── config/models.yaml          # model routes + fallbacks
+├── ops/                        # prometheus.yml + alerts.yml, Grafana provisioning + dashboard
+├── loadtest/locustfile.py      # Locust load test, TTFT p95 gate
+├── scripts/backup.py           # backup / restore / restore test (Postgres, Qdrant, object storage)
 ├── src/rag/
 │   ├── api/                    # routers, schemas, SSE, error handlers
 │   ├── auth/                   # passwords, jwt, refresh tokens, api keys, rbac (Role, Permission, require)
-│   ├── core/                   # config (pydantic-settings), logging, errors, telemetry
+│   ├── core/                   # config (pydantic-settings), logging, errors, metrics, telemetry (OTel)
 │   ├── domain/                 # Document, Chunk, Citation, ChatTurn, RequestContext (pure Pydantic)
 │   ├── ingestion/              # parsers, chunker, pipeline
 │   ├── retrieval/              # hybrid search + rerank + grading threshold
 │   ├── graph/                  # state, nodes, graph builder, prompts/
+│   ├── evaluation/             # LLM judge shared by evals and the judge_answer job
 │   ├── email/                  # templates/, send_email job handler
-│   ├── worker/                 # job loop, handlers registry (ingest_document, send_email, reindex)
+│   ├── worker/                 # job loop, handlers (ingest_document, send_email, reindex, purge_document, judge_answer)
 │   ├── adapters/
 │   │   ├── llm/                # base.py (LLM protocol), ollama.py, anthropic.py, openai.py, router.py
 │   │   ├── embedder.py, vectorstore.py, reranker.py, storage.py, mailer.py
@@ -494,6 +512,7 @@ rag-mvp/
 │       ├── app/(app)/…         # chat, documents, receipts, members, settings
 │       ├── components/         # workspace shell, chat, documents, receipts, members, keys/audit
 │       └── lib/                # session (JWE cookie), security (CSRF, allowlist, IP), upstream, SSE parser
+│   └── e2e/                    # Playwright browser end-to-end tests (Mailpit-backed auth flows)
 ├── ui/                         # Streamlit (optional legacy UI)
 ├── evals/
 │   ├── golden.jsonl            # {question, expected_doc_ids, reference_answer}
@@ -550,7 +569,7 @@ sequenceDiagram
 - **Bounded loops**: graph `recursion_limit` set; max 1 rewrite.
 - **Graceful degradation**: Ollama down → cloud fallback; reranker failure → RRF results; sparse failure → dense only. All logged as warnings with metrics.
 - **Idempotent jobs**: ingestion via deterministic IDs; emails via job ID as `Message-ID` dedupe key; terminal `failed` state after max attempts.
-- **Stateless API**: all state in Postgres/Qdrant; LangGraph checkpointer in Postgres.
+- **Stateless API**: all state in Postgres/Qdrant. The graph is stateless per turn (history is reloaded from `messages`), so no LangGraph checkpointer is needed.
 - **Rate limiting** per tenant on `/v1/chat` and uploads; per IP + email on login and password reset.
 
 ### 5.2 Security
@@ -566,15 +585,16 @@ sequenceDiagram
 
 ### 5.3 Observability
 
-- One trace per request across API → graph nodes → LLM/embedding/Qdrant calls.
-- Log per message: provider, model, `fallback_used`, prompt version, tokens, cost (Ollama = 0), latency per node, top rerank score.
-- Dashboards/alerts: p95 latency, error rate, **fallback rate per route** (rising = Ollama or a provider is unhealthy), `insufficient_context` rate, thumbs-down rate, job failures (ingest + email).
+- **Traces** (OpenTelemetry, OTLP/HTTP; on when `OTEL_EXPORTER_OTLP_ENDPOINT` is set): one trace per request with a span per graph node (`rag.node.*`) and per LLM attempt (`llm.complete`/`llm.stream` with `gen_ai.*` provider, model and token attributes, outcome and route position), plus one span per worker job. Spans carry identifiers, scores and token counts, never prompts or document text. `trace_id` is on every JSON log line and stored on each assistant message. Per-message SSE spans are suppressed so a streamed answer is one span.
+- **Per message** (Postgres): provider, model, `fallback_used`, prompt version, tokens, latency, and in dev the graph path and rerank scores.
+- **Metrics** (`GET /metrics`, Prometheus): `http_requests_total` / `http_request_duration_seconds` by route template; `llm_requests_total{purpose,provider,model,outcome}`, `llm_request_duration_seconds`, `llm_tokens_total`, `llm_fallback_total{purpose,from,to}` (`to="none"` = route exhausted); `rag_time_to_first_token_seconds`, `rag_answer_duration_seconds`, `rag_answers_total{outcome}` (answered, direct, insufficient_context, error), `rag_top_rerank_score`, `rag_retrieval_degraded_total{kind}`, `rag_feedback_total{rating}`. Job backlog/age/terminal failures and 24 h online faithfulness/relevancy are read from Postgres at scrape time, so every replica reports the same values (aggregate with `max`).
+- **Dashboards/alerts** (`ops/`): API down, 5xx ratio (excluding health checks and scrapes), p95 TTFT > 3 s, chat error rate, **fallback rate per route** (rising = Ollama or a provider is unhealthy), exhausted routes, `insufficient_context` rate, thumbs-down rate, job failures by completion time and stale backlog, online faithfulness < 0.90. Each alert maps to a [runbook](RUNBOOKS.md). The local profile evaluates rules only; notification delivery requires a separately configured Alertmanager and receivers.
 
 ### 5.4 Evaluation
 
 - **Golden set** (50–100 real questions) with expected source documents.
 - **Retrieval metrics** (deterministic): recall@k, MRR — on every change to chunking, embeddings, or retrieval.
-- **Generation metrics**: RAGAS faithfulness + answer relevancy, judged by the `eval_judge` route (OpenAI).
+- **Generation metrics**: faithfulness + answer relevancy from a small LLM judge (`rag.evaluation.judge`, RAGAS-style definitions) on the `eval_judge` route (OpenAI). The same judge grades sampled production answers (§4.2).
 - **Provider comparison**: same golden set run through each `generation` candidate (Claude, OpenAI, a local Ollama model) → quality, latency, and cost table that drives the routing config.
 - **Orchestration check**: accuracy of `analyze_query` (`needs_retrieval` + standalone query) for the local model vs. the fallback — confirms the local 4B model is good enough.
 - Runs in CI on PRs touching `ingestion/`, `retrieval/`, `graph/`, `config/models.yaml`; fails on regression beyond tolerance.
@@ -615,7 +635,7 @@ History sidebar: "New chat", debounced title search, groups (Today / Yesterday /
 
 Workspace navigation shows Chat/Documents/Receipts to viewers and editors; Members and Settings appear when the user has their management/audit permissions. Direct page access also shows a permission message when denied, while the API remains the authorization boundary. Admin lists use 25-row pages; audit history uses an ID cursor. Receipt amounts are displayed as returned decimal strings with currency, and warnings remain visible. API-key secrets are held only in transient component state after creation and can be copied/dismissed; list responses contain only prefixes.
 
-Implementation verification (7 October 2026): 62 frontend tests and 135 backend tests pass; the production Podman web image builds with Turbopack and runs locally. `scripts/smoke_workspace.py` exercises the live BFF/API/email/role/key/receipt/audit paths with temporary fixtures and cleanup. Its receipt is seeded; upload/OCR is covered separately by integration tests with model extraction faked. No browser connection was available for visual/click-through checks. Browser end-to-end automation remains separate work.
+Implementation verification (20 October 2026): 72 frontend unit tests and 170 backend tests pass; the production Podman web image builds and runs locally. Browser end-to-end tests (`web/e2e`, Playwright) cover signup with email verification, sign-out/sign-in, wrong password, invite → accept → role-limited navigation, API key create/dismiss/revoke, CSP and hardening headers, CSRF and proxy allowlist, and (opt-in, `E2E_CHAT=1`, needs a model) a streamed chat that moves to `/c/{id}` and persists. CI runs them against the API, worker and production web build; the chat spec runs locally only. `scripts/smoke_workspace.py` still exercises the live BFF/API/email/role/key/receipt/audit paths.
 
 ### 6.2 Session and token handling
 
@@ -681,6 +701,7 @@ podman compose exec api rag admin create --email you@example.com --tenant demo
 | `qdrant` | `qdrant/qdrant` | 6333, 6334 | named volume |
 | `objectstore` | `rustfs/rustfs` | 9000, 9001 | named volume, S3-compatible |
 | `mailpit` | `axllent/mailpit` | 1025 (SMTP), 8025 (UI) | dev only |
+| `prometheus`, `grafana`, `jaeger` | upstream images | 9090; 3001 (`GRAFANA_HOST_PORT`); 16686 (UI), 4318 (OTLP) | `--profile observability`; config in `ops/` |
 | Ollama | **host process** | 11434 | containers use `OLLAMA_BASE_URL=http://host.containers.internal:11434` |
 
 Podman notes:
@@ -747,7 +768,7 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 ### Phase 4 — Agentic Graph + Conversations (Weeks 4–5)
 
 - LangGraph nodes: `analyze_query`, `respond_direct`, `grade`, `rewrite_query`, `insufficient_context` on the local `orchestration` route.
-- Conversations/messages persistence (own-only access), history condensation, Postgres checkpointer.
+- Conversations/messages persistence (own-only access), history condensation. (A Postgres checkpointer was planned and dropped: see Revision 5, #21.)
 - Tune grading threshold; measure local-model `analyze_query` accuracy vs. Haiku.
 - **Exit:** eval ≥ Phase 3 baseline; follow-ups resolve correctly; ≤ 3 LLM calls/query; fallback rate < 5% in the eval run.
 
@@ -762,8 +783,9 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 - **Done in this step:** migration `0004` (`conversations.updated_at`, indexes); history list ordering, keyset paging, title search, rename, delete, bounded message window with "load earlier"; tests for ordering, paging, search, rename/delete cascade, continuation context, and owner-only access.
 - **Done in this step:** `web/` BFF (session cookie, refresh single-flight, allowlisted proxy, CSRF, CSP nonce, security headers); auth flows; chat with history sidebar and continuation; documents. CI job: lint, typecheck, format, unit tests, build, `npm audit`.
 - **Implemented:** Receipts, Members (invitations/roles/removal), Settings (API keys/audit history), permission-aware responsive navigation, and the corresponding BFF allowlist. Streamlit is optional; the default launcher serves all workspace features in Next.js.
-- **Next:** automated browser end-to-end tests in CI and complete retirement of legacy code when no longer needed; rolling conversation summary if long-chat evals require it.
-- **Exit:** all workspace pages have Next.js equivalents (implemented). Browser CI coverage and complete removal of legacy code remain outstanding; API/BFF functional verification is separate from browser tests.
+- **Implemented (Revision 5):** Playwright browser end-to-end tests in CI (`web/e2e`).
+- **Next:** retire the legacy Streamlit UI when no longer needed; rolling conversation summary if long-chat evals require it.
+- **Exit:** all workspace pages have Next.js equivalents and browser CI coverage (implemented). Removal of legacy code remains outstanding.
 
 ### Phase 6 — Hardening & Launch (Week 7)
 
@@ -772,6 +794,7 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 - Load test (e.g. Locust) against §1 targets, including Ollama concurrency.
 - Build images with Podman; deploy; backup/snapshot for Postgres and Qdrant verified by a restore test.
 - **Exit:** §1 targets met; runbooks for re-indexing, restore, and provider outage.
+- **Status (20 October 2026):** implemented — rate limits (chat, upload, login, signup, reset, refresh, invite); upload limits; eval CI gate (conditional on infrastructure secrets); metrics, alerts, dashboard and tracing (§5.3); Locust load test (`loadtest/`) with a TTFT p95 gate; backup/restore with an automated restore test (`scripts/backup.py`), verified locally including a full restore round trip on the test database; [runbooks](RUNBOOKS.md). **Not yet met:** the §1 targets have not been measured on production hardware. A local smoke run (Apple Silicon, local Ollama orchestration only, 2 users, workspace without documents) gave chat TTFT p95 ≈ 5.2 s, above the 3 s target; re-measure with cloud generation and a seeded corpus before launch.
 
 ---
 
@@ -796,3 +819,7 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 | UI | Next.js App Router as a BFF | Streamlit; SPA holding tokens in `localStorage` | Product-grade UI; tokens never reachable from JS; one same-origin surface for CSP/CSRF. Streamlit got the MVP out; the API-first design made the swap a UI-only change |
 | Chat history paging | Keyset `(updated_at, id)` | `OFFSET` | Stable while chats move and are deleted; constant cost per page |
 | Long-chat context | Fixed window of last N turns + query condensation | Whole transcript; rolling summary now | Bounded cost/latency; add a rolling summary only if evals show degradation |
+| Graph state | Stateless graph per turn, history from `messages` | LangGraph Postgres checkpointer | Nothing to resume between turns; avoids a write per node. Add a checkpointer with human-in-the-loop interrupts |
+| Tracing | OpenTelemetry over OTLP (Jaeger locally, Langfuse optional) | Langfuse SDK directly | Vendor-neutral; the same spans go to any OTLP backend, and Langfuse ingests OTLP |
+| Metrics | Prometheus pull, DB-derived gauges at scrape | Push gateway; per-process job counters | Job and eval health come from Postgres, so they are correct with any number of API/worker replicas |
+| Online quality | Sampled async judge (`judge_answer` job) | Inline groundedness check | Off the hot path; zero latency cost; sample rate is config |

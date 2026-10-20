@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -224,12 +225,16 @@ class Job(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     run_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (
-        CheckConstraint("type in ('ingest_document','send_email','reindex','purge_document')", name="ck_job_type"),
+        CheckConstraint(
+            "type in ('ingest_document','send_email','reindex','purge_document','judge_answer')", name="ck_job_type"
+        ),
         CheckConstraint("status in ('queued','running','done','failed')", name="ck_job_status"),
         Index("ix_jobs_claim", "status", "run_after"),
+        Index("ix_jobs_finished", "status", "finished_at"),
     )
 
 
@@ -273,6 +278,19 @@ class Message(Base):
     debug: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (Index("ix_messages_conversation_created", "conversation_id", "created_at"),)
+
+
+class AnswerEval(Base):
+    """Sampled online faithfulness/relevancy grade of an assistant message (judge_answer job)."""
+
+    __tablename__ = "answer_evals"
+    message_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True)
+    faithfulness: Mapped[float] = mapped_column(Float)
+    relevancy: Mapped[float] = mapped_column(Float)
+    judge_provider: Mapped[str] = mapped_column(String(32))
+    judge_model: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = _created()
+    __table_args__ = (Index("ix_answer_evals_created", "created_at"),)
 
 
 class Feedback(Base):

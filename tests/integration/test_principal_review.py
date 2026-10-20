@@ -86,7 +86,7 @@ async def test_deletion_during_generation_emits_error(monkeypatch: pytest.Monkey
         yield "values", {"answer": "done"}
 
     monkeypatch.setattr(chat, "build_graph", lambda: Mock(astream=values))
-    events = [event async for event in chat._run({}, uuid.uuid4(), "trace")]
+    events = [event async for event in chat._run({}, uuid.uuid4(), "trace", 0.0)]
     assert len(events) == 1 and '"code": "not_found"' in events[0]
 
 

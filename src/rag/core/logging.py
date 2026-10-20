@@ -5,6 +5,8 @@ import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
 
+from opentelemetry import trace
+
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 # Defence in depth: never let tokens, keys or passwords reach log sinks (OWASP A09).
@@ -32,6 +34,9 @@ class JsonFormatter(logging.Formatter):
         }
         if rid := request_id_var.get():
             payload["request_id"] = rid
+        span = trace.get_current_span().get_span_context()
+        if span.is_valid:
+            payload["trace_id"] = format(span.trace_id, "032x")
         extra = getattr(record, "extra_fields", None)
         if isinstance(extra, dict):
             payload.update(extra)
