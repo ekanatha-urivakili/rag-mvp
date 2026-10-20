@@ -47,9 +47,11 @@ The default UI is Next.js; Streamlit is available through the optional `legacy` 
 - Re-embedding (`rag reindex`) through a Qdrant alias swap, with bounded batches and retry recovery. Model/dimension changes require coordinated API/worker settings and a query pause ([operations](#operations)).
 - Retrieval and faithfulness evals (`evals/run_eval.py`).
 - Next.js web UI that keeps API tokens out of the browser (backend-for-frontend), with CSRF, CSP and XSS controls ([details](#web-ui)).
+- Prometheus metrics, OpenTelemetry tracing, alert rules and a Grafana dashboard ([details](#observability)); sampled online faithfulness grading.
+- Backup/restore with an automated restore test, a Locust load test, and [runbooks](docs/RUNBOOKS.md).
 - Liveness and dependency readiness endpoints, bounded local model warmup, non-root containers, persistent local infrastructure volumes, and automatic database migrations on Compose API startup.
 - CLI commands for administrator/workspace creation and queued reindexing; a local workspace smoke-test script.
-- CI checks for Python and web lint, formatting, types, tests, web builds, and dependency audits; optional retrieval/faithfulness evaluation gate.
+- CI checks for Python and web lint, formatting, types, tests, web builds, browser end-to-end tests, and dependency audits; optional retrieval/faithfulness evaluation gate.
 - OWASP Web/API Top 10 controls ([mapping](#owasp-coverage)), including escaped document context and static parameterized worker updates.
 
 ## Technology stack and rationale
@@ -78,7 +80,7 @@ These are the technologies used by the implementation. Versions come from `pypro
 | Optional legacy UI | Streamlit | Retains a Python-based interface for existing workflows; the default workspace UI is Next.js. |
 | Containers and local infrastructure | Podman + Compose, OCI Containerfiles | Reproduces the API, worker, web app, database, search, storage, and email services locally, with persistent volumes and constrained application containers. |
 | Quality and delivery checks | `uv`, Ruff, strict mypy, pytest; ESLint, Prettier, TypeScript, Vitest; GitHub Actions and dependency audits | Lockfiles make dependency resolution reproducible. CI checks types, formatting, behavior, builds, and dependencies, including integration tests with provisioned services. |
-| Observability and evaluation | Structured JSON logs, request/trace IDs, stored model usage; retrieval metrics and an LLM faithfulness judge | Provides operational and answer-quality evidence with the current stack. OpenTelemetry, Langfuse, and RAGAS are not implemented. |
+| Observability and evaluation | OpenTelemetry (OTLP), Prometheus `prometheus-client`, structured JSON logs; retrieval metrics and an LLM faithfulness judge (offline and sampled online); Prometheus, Grafana and Jaeger in an optional compose profile | Vendor-neutral traces work with Jaeger locally or Langfuse; pull-based metrics read job and eval health from Postgres, so they stay correct across replicas. RAGAS is not used. |
 
 ## High-level design (HLD)
 
@@ -309,7 +311,7 @@ erDiagram
 
 ## Implemented scope and limits
 
-The features above are implemented. SSO/OIDC, custom roles, per-document ACLs, GraphRAG, web-search/action agents, tenant-specific model routing, multi-region deployment, OpenTelemetry, and Langfuse are deferred. Default retrieval is tenant-wide; API clients may filter by document. Citation validation checks supplied source indices, while factual faithfulness is evaluated separately. The web app has no offline/PWA workflow.
+The features above are implemented. SSO/OIDC, custom roles, per-document ACLs, GraphRAG, web-search/action agents, tenant-specific model routing, and multi-region deployment are deferred. Langfuse is supported as an OTLP trace backend, not through its SDK. Default retrieval is tenant-wide; API clients may filter by document. Citation validation checks supplied source indices, while factual faithfulness is evaluated separately. The web app has no offline/PWA workflow.
 
 ## Quickstart
 
@@ -404,11 +406,12 @@ For document answers, clients must use the SSE `answer` event to replace provisi
 
 ```bash
 ./start.sh test          # starts the test infrastructure, then runs everything below
-uv run ruff check src tests ui evals scripts
-uv run ruff format --check src tests ui evals scripts
+uv run ruff check src tests ui evals scripts loadtest
+uv run ruff format --check src tests ui evals scripts loadtest
 uv run mypy src   # mypy runs in strict mode
 uv run pytest            # unit tests, plus integration tests against the compose services (uses database rag_test)
 (cd web && npm run lint && npm run typecheck && npm test && npm run build)
+(cd web && npx playwright install chromium && npm run e2e)   # browser E2E against the running stack; E2E_CHAT=1 adds a live chat
 uv run python evals/run_eval.py --tenant-id <uuid> --provider anthropic --min-recall 0.85 --min-faithfulness 0.90
 ```
 
@@ -429,6 +432,8 @@ The integration suite covers these flows end to end, including real emails read 
 Unit tests also verify escaping of retrieved text, headings, and source attributes against delimiter and attribute injection.
 
 `tests/unit/test_route_coverage.py` fails CI if someone adds a route without an auth dependency.
+
+Browser end-to-end tests (`web/e2e`, Playwright) sign up through the real verification email, sign out and back in, invite and accept a viewer, check role-limited navigation, manage an API key, and check security headers, CSRF rejection and the proxy allowlist. The setup step signs up one new workspace per run; signup is limited to `RL_SIGNUP_PER_IP` (default 5) per hour, so repeated local runs may need to wait or raise it. CI runs the suite against the API, worker and production web build.
 
 ## Signup
 
@@ -521,11 +526,22 @@ The table below maps implemented controls to Web 2021 and API 2023 identifiers. 
 - **No LangGraph Postgres checkpointer.** Conversation state is reloaded from `messages` on every turn, which is all the graph needs today.
 - **Email links use `?token=`, not a URL fragment.** The links point at the web UI, which reads the token server-side, strips it from the address bar on load, and sends `Referrer-Policy: no-referrer`. Tokens are single-use and short-lived, and the API only ever receives them in POST bodies.
 - **Two extra endpoints:** `POST /v1/auth/switch-tenant` and `GET /v1/invitations` (the pending list in the Members page). Job types also include `purge_document`, which handles async raw-file and chunk cleanup after a delete.
-- **Faithfulness** is scored by a small LLM-judge in `evals/run_eval.py` on the `eval_judge` route, not the RAGAS library.
-- **Observability:** structured JSON logs with request and trace IDs, and per-message provider, model, fallback, token and latency data stored on `messages`. OpenTelemetry and Langfuse wiring are not done yet.
+- **Faithfulness** is scored by a small LLM judge (`rag.evaluation.judge`) on the `eval_judge` route, not the RAGAS library. The same judge grades a sampled share of production answers when `ONLINE_EVAL_SAMPLE_RATE` > 0.
+- **Observability:** OpenTelemetry traces go to any OTLP backend (Jaeger in the local `observability` profile; Langfuse through its OTLP endpoint) rather than through the Langfuse SDK. Metrics are Prometheus. See [Observability](#observability).
+
+## Observability
+
+- **Metrics:** `GET /metrics` (Prometheus). Open in dev/test; in prod it needs `METRICS_TOKEN` (sent as a bearer token) or returns 404. It is not exposed through the web BFF. Includes LLM calls/latency/tokens per provider, `llm_fallback_total{purpose,from,to}`, chat TTFT and outcomes, retrieval degradation, feedback, job backlog/failures and online faithfulness.
+- **Traces:** set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` for Langfuse) to get a span per request, graph node, LLM attempt and worker job. Spans never include prompts or document text.
+- **Local stack:** `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 podman compose --profile observability up -d` starts Prometheus (`127.0.0.1:9090`, with alert rules), Grafana (`127.0.0.1:3001`, dashboard **Moontig RAG overview**) and Jaeger (`127.0.0.1:16686`). Config lives in [`ops/`](ops/).
+- **Online faithfulness:** `ONLINE_EVAL_SAMPLE_RATE=0.05` grades 5% of cited answers asynchronously with the `eval_judge` route (this sends the answer's context to that provider). Results land in `answer_evals` and on the dashboard.
 
 ## Operations
 
+Procedures for provider outages, failing jobs, quality regressions, restore and re-indexing are in [docs/RUNBOOKS.md](docs/RUNBOOKS.md); each alert links to one.
+
+- **Backups:** `uv run python scripts/backup.py backup` writes a consistent Postgres dump, a Qdrant snapshot and the raw uploads to `backups/<timestamp>/`. `scripts/backup.py verify <dir>` is the restore test (scratch database and collection, counts compared with the manifest). `scripts/backup.py restore <dir> --yes` replaces live data.
+- **Load test:** `uvx locust -f loadtest/locustfile.py --host http://localhost:8000 --headless -u 10 -r 2 -t 5m` with `LOADTEST_EMAIL`/`LOADTEST_PASSWORD` of an existing account. It reports chat TTFT separately and exits non-zero when its p95 exceeds `TTFT_P95_TARGET_S` (default 3 s). Raise `RL_CHAT_PER_USER`/`RL_CHAT_PER_TENANT` on the target first.
 - **Re-embed or switch embedding model:** set `EMBEDDING_*`, then run `rag reindex --version 2`. The worker builds `chunks_v2` from Postgres (no re-parsing), atomically flips the `chunks_current` alias, and retains the previous collection for in-flight reads and manual rollback. Reindex serializes against ingestion/upload/delete, rebuilds an incomplete target on retry, and reads Postgres in bounded batches. Stop query traffic during embedding model/dimension changes; the API and worker need the same new embedding settings. Remove retired collections after the rollback window.
 - **Job retries:** 3 attempts with exponential backoff. Terminal ingestion failures mark the document `failed` and email the uploader. Re-uploading that file queues another attempt. Workers hold a dedicated job-row lock during processing, preventing lease expiry from reclaiming a live job. Both successful and terminally failed email jobs have their link payloads scrubbed.
 - **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. The `web` service receives `API_URL`, `APP_ORIGIN`, `SESSION_SECRET`, `ENV` and `TRUSTED_PROXY_HOPS`; the legacy `ui` service only `API_URL`. Neither gets the backend env file or model volume. Provider keys and database/JWT/storage credentials stay in API/worker services.
