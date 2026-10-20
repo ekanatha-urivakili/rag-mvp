@@ -130,8 +130,9 @@ jobs:
       - name: Start API and worker
         run: |
           uv run alembic upgrade head
-          nohup uv run uvicorn rag.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
-          nohup uv run python -m rag.worker > worker.log 2>&1 &
+          # Run from the venv, not `uv run`: a long-lived uv process holds the cache lock setup-uv prunes after the job.
+          nohup .venv/bin/uvicorn rag.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          nohup .venv/bin/python -m rag.worker > worker.log 2>&1 &
           timeout 180 bash -c 'until curl -sf http://127.0.0.1:8000/healthz; do sleep 2; done'
       - name: Build and start web
         working-directory: web
