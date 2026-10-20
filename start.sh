@@ -39,6 +39,9 @@ compose() { podman compose "$@" 2> >(grep -v 'Executing external compose provide
 
 # --- Podman ---------------------------------------------------------------------
 step "Checking Podman"
+if ! command -v podman >/dev/null && [[ "$(uname -s)" == "Darwin" && -x /opt/podman/bin/podman ]]; then
+  export PATH="/opt/podman/bin:$PATH"
+fi
 command -v podman >/dev/null || die "Podman is not installed. Install it from https://podman.io and re-run."
 if ! podman info >/dev/null 2>&1; then
   if [[ "$(uname -s)" == "Darwin" || "$(uname -s)" == MINGW* ]] && podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then
@@ -107,30 +110,103 @@ PG_PORT="${POSTGRES_HOST_PORT:-5432}"
 ports=("$PG_PORT" 6333 9000 "${MAILPIT_SMTP_PORT:-1025}" "${MAILPIT_UI_PORT:-8025}")
 [[ "$mode" == all ]] && ports+=(8000 3000)
 ours=$(podman ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Ports}}' 2>/dev/null || true)
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# Frees a port held by something outside this project: other Podman containers are stopped,
+# other processes are terminated. Browsers and the container runtime itself are never killed.
+free_port() {
+  local port=$1 containers pids pid cmd
+  # Podman collapses adjacent ports into ranges, e.g. 127.0.0.1:6333-6334->6333-6334/tcp.
+  containers=$(podman ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -E ":${port}(-[0-9]+)?->" | cut -d' ' -f1 || true)
+  if [[ -n "$containers" ]]; then
+    warn "Stopping container(s) on port ${port}: $(tr '\n' ' ' <<<"$containers")"
+    # shellcheck disable=SC2086
+    podman stop $containers >/dev/null
+  else
+    command -v lsof >/dev/null || { warn "lsof is not installed; can't find what owns port ${port}"; return 1; }
+    pids=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
+    [[ -n "$pids" ]] || { warn "Can't see the owner of port ${port} (another user's process?)"; return 1; }
+    for pid in $pids; do
+      cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      if grep -qiE 'firefox|chrome|chromium|gvproxy|podman|vfkit|docker' <<<"$cmd"; then
+        warn "Port ${port} is used by ${cmd##*/} (pid ${pid}); not stopping it"
+        return 1
+      fi
+    done
+    for pid in $pids; do
+      cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      warn "Stopping ${cmd##*/} (pid ${pid}) on port ${port}"
+      kill "$pid" 2>/dev/null || true
+    done
+    local deadline=$((SECONDS + 5))
+    while port_open "$port" && ((SECONDS < deadline)); do sleep 0.2; done
+    port_open "$port" && kill -9 $pids 2>/dev/null || true
+  fi
+  local deadline=$((SECONDS + 5))
+  while port_open "$port" && ((SECONDS < deadline)); do sleep 0.2; done
+  ! port_open "$port"
+}
+
 busy=0
 for port in "${ports[@]}"; do
-  # Podman collapses adjacent ports into ranges, e.g. 127.0.0.1:6333-6334->6333-6334/tcp.
   if grep -qE "127\.0\.0\.1:${port}(-[0-9]+)?->" <<<"$ours"; then
     continue
   fi
-  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+  if port_open "$port"; then
     warn "Port ${port} is already in use by another process or project"
-    busy=1
+    if free_port "$port"; then
+      ok "Freed port ${port}"
+    else
+      busy=1
+    fi
   fi
 done
 [[ "$busy" == 0 ]] || die "Free those ports, or set the overrides in .env (POSTGRES_HOST_PORT, MAILPIT_UI_PORT, MAILPIT_SMTP_PORT)."
 ok "Ports are free or already owned by ${PROJECT}"
 
-# --- Ollama (optional) ------------------------------------------------------------
+# --- Ollama -----------------------------------------------------------------------
 step "Checking Ollama"
-if tags=$(curl -sf -m 3 "${OLLAMA_BASE_URL:-http://localhost:11434}/api/tags"); then
+ollama_url="${OLLAMA_BASE_URL:-http://localhost:11434}"
+ollama_url="${ollama_url%/}"
+if [[ "$mode" == all ]] && ! curl -sf -m 3 "${ollama_url}/api/tags" >/dev/null; then
+  case "$ollama_url" in
+    http://localhost:11434|http://127.0.0.1:11434)
+      if command -v ollama >/dev/null; then
+        step "Starting Ollama on localhost (logs: .ollama.log)"
+        OLLAMA_HOST=127.0.0.1:11434 nohup ollama serve >.ollama.log 2>&1 </dev/null &
+        ollama_deadline=$((SECONDS + 30))
+        until curl -sf -m 3 "${ollama_url}/api/tags" >/dev/null; do
+          ((SECONDS < ollama_deadline)) || die "Ollama did not start; check .ollama.log"
+          sleep 1
+        done
+      fi
+      ;;
+  esac
+fi
+if tags=$(curl -sf -m 3 "${ollama_url}/api/tags"); then
   ok "Ollama is reachable"
   for model in qwen3.5:4b bge-m3 "${OLLAMA_VISION_MODEL:-qwen3-vl:latest}"; do
-    grep -q "\"${model%%:latest}" <<<"$tags" || warn "Model ${model} is not pulled: ollama pull ${model}"
+    model_tag="$model"
+    [[ "$model_tag" == *:* ]] || model_tag="${model_tag}:latest"
+    if ! grep -Fq "\"${model_tag}\"" <<<"$tags"; then
+      if [[ "$mode" == all ]] && command -v ollama >/dev/null; then
+        step "Pulling Ollama model ${model}"
+        OLLAMA_HOST="$ollama_url" ollama pull "$model"
+      else
+        warn "Model ${model} is not pulled: ollama pull ${model}"
+      fi
+    fi
   done
+  if [[ "$mode" == all ]]; then
+    step "Warming local chat model"
+    curl -sf --max-time 120 -H 'Content-Type: application/json' \
+      -d '{"model":"qwen3.5:4b","keep_alive":"30m","stream":false}' \
+      "${ollama_url}/api/generate" >/dev/null || die "Could not warm qwen3.5:4b; check Ollama logs"
+    ok "Local chat model is loaded"
+  fi
 else
   warn "Ollama is not reachable. Tests still run, but local chat, embeddings and receipt extraction need it:"
-  warn "  OLLAMA_HOST=0.0.0.0 ollama serve   (see README, 'Ollama and containers')"
+  warn "  Install Ollama, or start the server configured by OLLAMA_BASE_URL (see README, 'Ollama and containers')"
 fi
 
 # --- Infrastructure ---------------------------------------------------------------
