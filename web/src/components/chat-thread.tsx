@@ -65,6 +65,8 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
   const router = useRouter();
   const streaming = progress !== null;
   const lastId = messages.at(-1)?.id;
+  const latestModel = messages.filter((m) => m.role === "assistant" && m.model).at(-1);
+  const displayedModel = streaming ? progress : latestModel;
 
   useEffect(() => () => abortRef.current?.abort(), []);
   useEffect(() => {
@@ -196,6 +198,20 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
   return (
     <div className="flex h-full flex-col">
+      <div className="shrink-0 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800" role="status">
+        <p className="mx-auto max-w-3xl text-sm text-zinc-600 dark:text-zinc-400">
+          <span className="font-medium">
+            {streaming ? "Current model" : latestModel?.error ? "Last attempted model" : "Last response model"}
+          </span>
+          {displayedModel?.model ? (
+            <span className="ml-2 rounded-full bg-zinc-100 px-3 py-1 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">
+              {displayedModel.model} · {displayedModel.provider}
+            </span>
+          ) : (
+            <span className="ml-2">{streaming ? "Starting…" : "Chosen automatically when you send a message"}</span>
+          )}
+        </p>
+      </div>
       <div
         ref={scrollRef}
         onScroll={(e) => {
