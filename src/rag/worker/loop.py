@@ -16,8 +16,10 @@ from rag.auth.service import purge_expired_tokens
 from rag.core import ratelimit
 from rag.core.config import get_settings
 from rag.core.logging import configure_logging, log_extra, redact
+from rag.core.telemetry import setup_tracing, tracer
 from rag.db.session import get_sessionmaker
 from rag.email.handler import send_email
+from rag.evaluation.judge import judge_answer
 from rag.ingestion.pipeline import ingest_document, on_ingest_failed, purge_document
 from rag.ingestion.reindex import reindex
 
@@ -31,6 +33,7 @@ HANDLERS: dict[str, Handler] = {
     "send_email": lambda _db, job_id, p: send_email(job_id, p),
     "reindex": lambda db, _id, p: reindex(db, p),
     "purge_document": lambda db, _id, p: purge_document(db, p),
+    "judge_answer": lambda db, _id, p: judge_answer(db, p),
 }
 ON_FAILURE: dict[str, FailureHook] = {"ingest_document": on_ingest_failed}
 
@@ -111,8 +114,11 @@ async def run_once() -> bool:
         try:
             if attempts > get_settings().job_max_attempts:
                 raise RuntimeError("Job exceeded the retry limit after worker interruption")
-            async with get_sessionmaker()() as db:
-                await HANDLERS[job_type](db, job_id, payload)
+            with tracer.start_as_current_span(
+                f"job.{job_type}", attributes={"rag.job_id": job_id, "rag.attempt": attempts}
+            ):
+                async with get_sessionmaker()() as db:
+                    await HANDLERS[job_type](db, job_id, payload)
             await _finish(lease_db, job_id, job_type)
             log.info(
                 "job_done",
@@ -127,6 +133,7 @@ async def run_once() -> bool:
 async def main() -> None:
     s = get_settings()
     configure_logging(s.log_level)
+    setup_tracing(s, "rag-worker")
     await get_vectorstore().ensure_collection()
     await get_storage().ensure_bucket()
     stop = asyncio.Event()

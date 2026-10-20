@@ -1,11 +1,14 @@
+import functools
+import inspect
 import operator
 import re
 import time
 import uuid
+from collections.abc import Callable
 from functools import cache, lru_cache
 from html import escape
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, cast
 
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +18,7 @@ from pydantic import BaseModel, Field
 from rag.adapters.llm.base import Message, RouteEntry, Usage
 from rag.adapters.llm.router import FallbackLLM, get_router
 from rag.core.config import get_settings
+from rag.core.telemetry import tracer
 from rag.domain.models import ChatTurn, Citation, ModelUsage, ScoredChunk
 from rag.retrieval.retriever import retrieve
 
@@ -213,16 +217,35 @@ def insufficient_context(state: RAGState) -> dict[str, Any]:
     return {"answer": INSUFFICIENT, "citations": [], "path": ["insufficient_context"]}
 
 
+def _traced[F: Callable[..., Any]](name: str, fn: F) -> F:
+    """One span per graph node, so a trace shows the path taken and where time went."""
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def run_async(state: RAGState) -> Any:
+            with tracer.start_as_current_span(f"rag.node.{name}"):
+                return await fn(state)
+
+        return cast(F, run_async)
+
+    @functools.wraps(fn)
+    def run(state: RAGState) -> Any:
+        with tracer.start_as_current_span(f"rag.node.{name}"):
+            return fn(state)
+
+    return cast(F, run)
+
+
 @lru_cache
 def build_graph() -> CompiledStateGraph[RAGState, None, RAGState, RAGState]:
     g = StateGraph(RAGState)
-    g.add_node("analyze_query", analyze_query)
-    g.add_node("respond_direct", respond_direct)
-    g.add_node("retrieve", retrieve_node)
-    g.add_node("rewrite_query", rewrite_query)
-    g.add_node("generate", generate)
-    g.add_node("validate_citations", validate_citations)
-    g.add_node("insufficient_context", insufficient_context)
+    g.add_node("analyze_query", _traced("analyze_query", analyze_query))
+    g.add_node("respond_direct", _traced("respond_direct", respond_direct))
+    g.add_node("retrieve", _traced("retrieve", retrieve_node))
+    g.add_node("rewrite_query", _traced("rewrite_query", rewrite_query))
+    g.add_node("generate", _traced("generate", generate))
+    g.add_node("validate_citations", _traced("validate_citations", validate_citations))
+    g.add_node("insufficient_context", _traced("insufficient_context", insufficient_context))
 
     g.add_edge(START, "analyze_query")
     g.add_conditional_edges("analyze_query", lambda s: "retrieve" if s["needs_retrieval"] else "respond_direct")

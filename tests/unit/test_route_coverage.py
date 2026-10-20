@@ -9,6 +9,7 @@ from rag.auth.deps import get_context, require_user
 PUBLIC = {
     ("GET", "/healthz"),
     ("GET", "/readyz"),
+    ("GET", "/metrics"),  # METRICS_TOKEN bearer check inside; disabled in prod without a token
     ("POST", "/v1/auth/login"),
     ("POST", "/v1/auth/signup"),
     ("POST", "/v1/auth/signup/verify"),

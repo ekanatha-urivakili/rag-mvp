@@ -113,6 +113,14 @@ class Settings(BaseSettings):
     worker_poll_interval_s: float = 1.0
     job_max_attempts: int = 3
 
+    # --- Observability ---
+    # Bearer token for GET /metrics. Unset: open in dev/test, disabled (404) in prod.
+    metrics_token: SecretStr | None = None
+    otel_exporter_otlp_endpoint: str | None = None  # e.g. http://jaeger:4318, or Langfuse <host>/api/public/otel
+    otel_exporter_otlp_headers: SecretStr | None = None  # "Authorization=Basic <base64 pk:sk>" for Langfuse
+    # Share of generated answers judged asynchronously by the `eval_judge` route (sends context to that provider).
+    online_eval_sample_rate: float = Field(default=0.0, ge=0, le=1)
+
     @field_validator("jwt_secret")
     @classmethod
     def _strong_jwt_secret(cls, v: SecretStr) -> SecretStr:

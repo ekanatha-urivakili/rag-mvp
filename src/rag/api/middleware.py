@@ -9,6 +9,7 @@ from starlette.types import ASGIApp
 
 from rag.core.config import get_settings
 from rag.core.logging import log_extra, request_id_var
+from rag.core.metrics import HTTP_LATENCY, HTTP_REQUESTS
 
 log = logging.getLogger("rag.access")
 
@@ -52,13 +53,18 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         h.setdefault("Cache-Control", "no-store")
         if self._settings.is_prod:
             h["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        elapsed = time.perf_counter() - t0
+        # Route template, not the raw path: IDs in paths would explode label cardinality.
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        HTTP_REQUESTS.labels(request.method, route, str(response.status_code)).inc()
+        HTTP_LATENCY.labels(request.method, route).observe(elapsed)
         log.info(
             "request",
             extra=log_extra(
                 method=request.method,
                 path=request.url.path,
                 status=response.status_code,
-                ms=int((time.perf_counter() - t0) * 1000),
+                ms=int(elapsed * 1000),
             ),
         )
         return response

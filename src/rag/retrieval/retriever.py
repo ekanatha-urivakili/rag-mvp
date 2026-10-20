@@ -2,6 +2,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
+from opentelemetry import trace
 from sqlalchemy import select
 
 from rag.adapters.embedder import get_embedder, get_sparse_embedder
@@ -9,6 +10,7 @@ from rag.adapters.reranker import get_reranker
 from rag.adapters.vectorstore import get_vectorstore
 from rag.core.config import get_settings
 from rag.core.logging import log_extra
+from rag.core.metrics import RETRIEVAL_DEGRADED, TOP_SCORE
 from rag.db.models import Document
 from rag.db.session import get_sessionmaker
 from rag.domain.models import ScoredChunk
@@ -30,6 +32,7 @@ async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | N
         sparse = await get_sparse_embedder().embed_query(query)
     except Exception:
         log.warning("sparse_embed_failed_dense_only", exc_info=True)
+        RETRIEVAL_DEGRADED.labels("sparse").inc()
         sparse = None
 
     hits = await get_vectorstore().hybrid_search(tenant_id, dense, sparse, s.retrieval_prefetch, filters)
@@ -76,7 +79,14 @@ async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | N
             reranked = True
         except Exception:
             log.warning("rerank_failed_using_rrf", exc_info=True)
+            RETRIEVAL_DEGRADED.labels("rerank").inc()
     top = chunks[: s.retrieval_top_k]
+    if reranked:
+        TOP_SCORE.observe(top[0].score)
+    span = trace.get_current_span()
+    span.set_attribute("rag.retrieval.candidates", len(hits))
+    span.set_attribute("rag.retrieval.top_score", top[0].score)
+    span.set_attribute("rag.retrieval.reranked", reranked)
     log.info(
         "retrieved",
         extra=log_extra(candidates=len(hits), top_score=round(top[0].score, 4), reranked=reranked),

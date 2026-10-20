@@ -16,6 +16,7 @@ from rag.api.routers import apikeys, audit, auth, chat, documents, health, me, m
 from rag.core.config import get_settings
 from rag.core.errors import AppError, RateLimited
 from rag.core.logging import configure_logging, request_id_var
+from rag.core.telemetry import setup_tracing
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +120,7 @@ def create_app() -> FastAPI:
         max_age=600,
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=s.allowed_hosts)
+    setup_tracing(s, "rag-api", app)
     return app
 
 

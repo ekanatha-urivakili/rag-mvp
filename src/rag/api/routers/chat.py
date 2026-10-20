@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.api.schemas import (
     ChatIn,
@@ -25,10 +27,13 @@ from rag.core import ratelimit
 from rag.core.config import get_settings
 from rag.core.errors import LLMUnavailable, NotFound
 from rag.core.logging import log_extra, request_id_var
+from rag.core.metrics import ANSWER_DURATION, ANSWERS, FEEDBACK, TTFT
+from rag.core.telemetry import current_trace_id
 from rag.db.models import Conversation, Feedback, Message
 from rag.db.session import get_sessionmaker
 from rag.domain.models import ChatTurn, RequestContext
-from rag.graph.graph import PROMPT_VERSION, RAGState, build_graph
+from rag.graph.graph import INSUFFICIENT, PROMPT_VERSION, RAGState, build_graph
+from rag.worker.queue import enqueue
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
@@ -57,6 +62,7 @@ async def _own_conversation(db: DB, ctx: RequestContext, conversation_id: uuid.U
 
 @router.post("/v1/chat")
 async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
+    started = time.perf_counter()
     s = get_settings()
     await ratelimit.hit(db, f"chat:tenant:{ctx.tenant_id}", s.rl_chat_per_tenant, s.rl_chat_window_s)
     await ratelimit.hit(db, f"chat:user:{ctx.user_id}", s.rl_chat_per_user, s.rl_chat_window_s)
@@ -96,17 +102,39 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
         "path": [],
         "models_used": [],
     }
-    trace_id = request_id_var.get() or uuid.uuid4().hex
+    trace_id = current_trace_id() or request_id_var.get() or uuid.uuid4().hex
     return StreamingResponse(
-        _run(state, conv.id, trace_id),
+        _run(state, conv.id, trace_id, started),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
 
 
-async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> AsyncIterator[str]:
+def _outcome(path: list[str], answer: str) -> str:
+    if "respond_direct" in path:
+        return "direct"
+    if "insufficient_context" in path or answer == INSUFFICIENT:
+        return "insufficient_context"
+    return "answered"
+
+
+def _maybe_judge(db: AsyncSession, final: dict[str, Any], message_id: uuid.UUID) -> None:
+    """Queue a sampled, asynchronous faithfulness check (§4.2): off the hot path, same transaction as the answer."""
+    rate = get_settings().online_eval_sample_rate
+    if not final.get("citations") or rate <= 0 or random.random() >= rate:  # noqa: S311
+        return
+    from rag.adapters.llm.router import get_router
+
+    if not get_router().has_provider("eval_judge"):
+        return
+    refs = [[c.doc_id, c.doc_version, c.chunk_index] for c in final.get("chunks", [])]
+    enqueue(db, "judge_answer", {"message_id": str(message_id), "chunks": refs})
+
+
+async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, started: float) -> AsyncIterator[str]:
     t0 = time.perf_counter()
     final: dict[str, Any] = {}
+    first_text = True
     try:
         async for mode, chunk in build_graph().astream(
             state, stream_mode=["custom", "values"], config={"recursion_limit": 12}
@@ -122,16 +150,21 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
             elif kind == "model":
                 yield _sse("model", {k: chunk[k] for k in ("purpose", "provider", "model")})
             elif kind == "token":
+                if first_text:
+                    TTFT.observe(time.perf_counter() - started)
+                    first_text = False
                 yield _sse("token", {"text": chunk["text"]})
             elif kind == "answer":
                 yield _sse("answer", {"text": chunk["text"]})
             elif kind == "citations":
                 yield _sse("citations", chunk["citations"])
     except LLMUnavailable:
+        ANSWERS.labels("error").inc()
         log.exception("chat_llm_unavailable")
         yield _sse("error", {"code": "llm_unavailable", "message": "The language model is unavailable. Try again."})
         return
     except Exception:
+        ANSWERS.labels("error").inc()
         log.exception("chat_failed")
         yield _sse("error", {"code": "internal_error", "message": "Something went wrong.", "trace_id": trace_id})
         return
@@ -167,8 +200,12 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str) -> As
             debug=debug,
         )
         db.add(msg)
+        await db.flush()
+        _maybe_judge(db, final, msg.id)
         await db.execute(update(Conversation).where(Conversation.id == conversation_id).values(updated_at=func.now()))
         await db.commit()
+    ANSWERS.labels(_outcome(debug["path"], msg.content)).inc()
+    ANSWER_DURATION.observe(time.perf_counter() - started)
     log.info("chat_done", extra=log_extra(trace_id=trace_id, path=debug["path"], latency_ms=msg.latency_ms))
     if get_settings().env == "dev":
         yield _sse("debug", debug)
@@ -273,3 +310,4 @@ async def feedback(message_id: uuid.UUID, body: FeedbackIn, ctx: ChatUser, db: D
         )
     )
     await db.commit()
+    FEEDBACK.labels("up" if body.rating > 0 else "down").inc()
