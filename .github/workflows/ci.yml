@@ -76,6 +76,87 @@ jobs:
       - name: Dependency vulnerability audit (OWASP A06)
         run: npm audit --omit=dev --audit-level=high
 
+  # Browser end-to-end: real API + worker + production web build against service containers, emails via Mailpit.
+  # No model is available in CI, so the opt-in chat spec (E2E_CHAT=1) is skipped here.
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag-ci-only
+          POSTGRES_DB: rag
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U rag" --health-interval 5s --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:latest
+        env:
+          QDRANT__SERVICE__API_KEY: qdrant-ci-only
+        ports: ["6333:6333"]
+      objectstore:
+        image: rustfs/rustfs:latest
+        env:
+          RUSTFS_ACCESS_KEY: ci-access
+          RUSTFS_SECRET_KEY: ci-secret-only
+        ports: ["9000:9000"]
+      mailpit:
+        image: axllent/mailpit:latest
+        ports: ["1025:1025", "8025:8025"]
+    env:
+      DATABASE_URL: postgresql+asyncpg://rag:rag-ci-only@localhost:5432/rag
+      JWT_SECRET: ci-only-jwt-secret-0123456789abcdefghijklmnop
+      QDRANT_URL: http://localhost:6333
+      QDRANT_API_KEY: qdrant-ci-only
+      S3_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: ci-access
+      S3_SECRET_KEY: ci-secret-only
+      SMTP_PORT: "1025"
+      EMBEDDING_DIM: "1024"
+      PUBLIC_UI_URL: http://localhost:3000
+      RL_SIGNUP_PER_IP: "100"
+      API_URL: http://127.0.0.1:8000
+      APP_ORIGIN: http://localhost:3000
+      SESSION_SECRET: ci-only-session-secret-0123456789abcdef
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: uv sync --frozen
+      - name: Start API and worker
+        run: |
+          uv run alembic upgrade head
+          nohup uv run uvicorn rag.api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          nohup uv run python -m rag.worker > worker.log 2>&1 &
+          timeout 180 bash -c 'until curl -sf http://127.0.0.1:8000/healthz; do sleep 2; done'
+      - name: Build and start web
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          cp -r .next/static .next/standalone/.next/static
+          PORT=3000 HOSTNAME=127.0.0.1 nohup node .next/standalone/server.js > ../web.log 2>&1 &
+          timeout 120 bash -c 'until curl -sf -o /dev/null http://127.0.0.1:3000/login; do sleep 2; done'
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run e2e
+        working-directory: web
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: |
+            web/playwright-report
+            web/test-results
+            api.log
+            worker.log
+            web.log
+          retention-days: 7
+
   # Retrieval/generation regression gate. Needs a seeded eval tenant + provider keys as secrets.
   eval:
     if: github.event_name == 'pull_request' && vars.EVAL_ENABLED == 'true'
