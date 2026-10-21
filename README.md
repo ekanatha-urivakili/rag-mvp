@@ -54,6 +54,9 @@ The default UI is Next.js; Streamlit is available through the optional `legacy` 
 - CI checks for Python and web lint, formatting, types, tests, web builds, browser end-to-end tests, and dependency audits; optional retrieval/faithfulness evaluation gate.
 - OWASP Web/API Top 10 controls ([mapping](#owasp-coverage)), including escaped document context and static parameterized worker updates.
 
+<img width="1766" height="1185" alt="image" src="https://github.com/user-attachments/assets/6a21df74-5d41-482b-89a1-6c8fccf0ba1f" />
+<img width="1766" height="1185" alt="image" src="https://github.com/user-attachments/assets/73c96501-a628-40a4-a82e-2188060c7386" />
+
 ## Technology stack and rationale
 
 These are the technologies used by the implementation. Versions come from `pyproject.toml`, `uv.lock`, `web/package.json`, and `compose.yaml`; model routes come from `config/models.yaml`.
