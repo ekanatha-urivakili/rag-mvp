@@ -17,8 +17,15 @@ test("a new chat streams an answer, moves to /c/{id}, and appears in history", a
   const path = new URL(page.url()).pathname;
   const history = page.getByRole("navigation", { name: "Chat history" });
   await expect(history.locator(`a[href="${path}"]`)).toHaveText(message);
+  const answer = page.locator(".prose-chat");
+  await expect(answer).toHaveCount(1);
+  await expect(answer).not.toHaveText("");
+  const answerText = await answer.innerText();
+  await expect(page.getByRole("button", { name: "Helpful", exact: true })).toBeVisible();
 
   await page.reload(); // the conversation is persisted, not just client state
   await expect(page.getByText(message).first()).toBeVisible();
+  await expect(answer).toHaveText(answerText);
+  await expect(page.getByRole("button", { name: "Helpful", exact: true })).toBeVisible();
   expect(new URL(page.url()).pathname).toBe(path);
 });
