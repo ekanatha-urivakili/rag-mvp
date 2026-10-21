@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import Link from "next/link";
+import { BrandMark } from "@/components/brand";
 import { Markdown } from "@/components/markdown";
 import { Alert, Button } from "@/components/ui";
 import { ApiError, getJson, request, sendJson } from "@/lib/client";
@@ -249,7 +250,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
         disabled={streaming}
         onSend={(t) => void send(t)}
         onStop={() => abortRef.current?.abort()}
-        placeholder={conversationId ? "Continue this conversation…" : "Ask a question about your documents…"}
+        placeholder={conversationId ? "Continue this conversation…" : "Ask about your documents…"}
       />
     </div>
   );
@@ -257,31 +258,64 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
 function EmptyState() {
   return (
-    <div className="w-full space-y-6 pb-8 text-center">
-      <p className="text-xs font-medium uppercase tracking-[0.2em] text-teal-700 dark:text-teal-400">
-        Your personal knowledge space
+    <div className="home-welcome w-full pb-4 text-center">
+      <div className="home-brand">
+        <BrandMark className="size-16 sm:size-20" />
+      </div>
+      <p className="brand-eyebrow mt-6">YOUR PERSONAL KNOWLEDGE SPACE</p>
+      <h1 className="mt-3 text-3xl font-semibold tracking-[-0.045em] sm:text-5xl">
+        A little curiosity.
+        <br />
+        <span className="text-violet-600 dark:text-violet-400">A clearer answer.</span>
+      </h1>
+      <p className="mx-auto mt-4 max-w-md text-sm leading-6 text-zinc-500">
+        Ask a question. Connect the dots. Find answers in your documents, with sources you can follow.
       </p>
-      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">What would you like to know?</h1>
-      <p className="mt-2 text-sm text-zinc-500">
-        Answers are grounded in your workspace&apos;s documents and cite their sources. Earlier chats are in the
-        sidebar; open one to continue it.
-      </p>
-      <div className="mx-auto grid max-w-lg gap-3 text-left sm:grid-cols-2">
-        <Link
-          href="/documents"
-          className="rounded-2xl border border-zinc-200 p-4 text-sm transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-        >
-          <span className="block font-medium">Explore your documents</span>
-          <span className="mt-1 block text-xs text-zinc-500">Upload files to give your answers context.</span>
+      <div className="mx-auto mt-8 grid max-w-xl gap-3 text-left sm:grid-cols-2">
+        <Link href="/documents" className="home-action group">
+          <span className="home-action-icon" aria-hidden="true">
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6" />
+            </svg>
+          </span>
+          <span className="mt-4 flex items-center justify-between font-semibold">
+            Explore your documents <span aria-hidden="true">→</span>
+          </span>
+          <span className="mt-1 block text-xs leading-5 text-zinc-500">
+            Upload files. Bring your knowledge together.
+          </span>
         </Link>
-        <Link
-          href="/receipts"
-          className="rounded-2xl border border-zinc-200 p-4 text-sm transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-        >
-          <span className="block font-medium">Organise your receipts</span>
-          <span className="mt-1 block text-xs text-zinc-500">Scan purchases and review the details.</span>
+        <Link href="/receipts" className="home-action group">
+          <span className="home-action-icon receipt-icon" aria-hidden="true">
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6m-6 4h6m-6 4h3" />
+            </svg>
+          </span>
+          <span className="mt-4 flex items-center justify-between font-semibold">
+            Organise your receipts <span aria-hidden="true">→</span>
+          </span>
+          <span className="mt-1 block text-xs leading-5 text-zinc-500">Scan purchases. Keep the details in reach.</span>
         </Link>
       </div>
+      <p className="mt-6 text-xs text-zinc-500">Start a question below, or pick up a conversation in your history.</p>
     </div>
   );
 }
@@ -416,7 +450,7 @@ function Composer({
   return (
     <div className="shrink-0 px-4 pt-3 pb-1">
       <form
-        className="mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800"
+        className="home-composer mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800"
         onSubmit={(e) => {
           e.preventDefault();
           submit();

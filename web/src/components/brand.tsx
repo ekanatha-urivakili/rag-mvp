@@ -1,29 +1,69 @@
 import Link from "next/link";
 
+export function BrandMark({ className = "size-10" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} fill="none" aria-hidden="true">
+      <rect width="48" height="48" rx="15" fill="#6D4AFF" />
+      <path d="M31.5 33.8A15 15 0 0 1 20.2 9.5 15 15 0 1 0 38.5 29a14.9 14.9 0 0 1-7 4.8Z" fill="#F5F0FF" />
+      <path d="m32 10 2.2 6.8L41 19l-6.8 2.2L32 28l-2.2-6.8L23 19l6.8-2.2L32 10Z" fill="#D8FFB0" />
+    </svg>
+  );
+}
+
 export function Brand() {
   return (
-    <Link href="/" className="inline-flex items-center gap-2 font-semibold tracking-tight" aria-label="Moontig home">
-      <svg viewBox="0 0 40 40" width="34" height="34" fill="none" aria-hidden="true">
-        <rect width="40" height="40" rx="12" fill="#0d9488" />
-        <path d="M12 10h13l5 5v17H12z" fill="#eef2ff" />
-        <path d="M25 10v6h5" fill="#6366f1" />
-        <path d="M16 21h10M16 25h7" stroke="#4f46e5" strokeWidth="2" strokeLinecap="round" />
-        <circle cx="11" cy="30" r="6" fill="#fbbf24" />
-        <path d="m8 30 2 2 4-4" stroke="#134e4a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      Moontig
+    <Link
+      href="/"
+      className="inline-flex items-center gap-2.5 text-xl font-semibold tracking-[-0.04em]"
+      aria-label="Moontig home"
+    >
+      <BrandMark className="size-9 shrink-0" />
+      <span>
+        Moontig<span className="text-violet-600 dark:text-violet-400">.</span>
+      </span>
     </Link>
   );
 }
 
 export function Hero() {
   return (
-    <section className="brand-hero rounded-2xl px-5 py-4">
-      <p className="text-xs font-semibold uppercase tracking-widest text-teal-200">
-        Your workspace, thoughtfully organised
+    <section className="auth-story">
+      <p className="brand-eyebrow">A LITTLE CLARITY. A LOT OF POSSIBILITY.</p>
+      <h2>
+        Your knowledge.
+        <br />A little more
+        <br />
+        <span>illuminated.</span>
+      </h2>
+      <p className="auth-story-copy">
+        Turn the things you save into the answers you need. A thoughtful home for your documents, receipts, and next big
+        question.
       </p>
-      <h1 className="mt-1 text-xl font-semibold sm:text-2xl">A home for every document and receipt.</h1>
-      <p className="mt-1 text-sm text-indigo-100">Upload, scan, and find answers with Moontig.</p>
+      <div className="knowledge-orbit" aria-hidden="true">
+        <div className="orbit-ring" />
+        <div className="orbit-ring orbit-ring-inner" />
+        <div className="orbit-moon">
+          <BrandMark className="size-24" />
+        </div>
+        <div className="orbit-note orbit-note-document">
+          <span className="note-icon">↗</span>
+          <div>
+            <strong>Everything, connected.</strong>
+            <small>Your documents, in one place</small>
+          </div>
+        </div>
+        <div className="orbit-note orbit-note-answer">
+          <span className="note-icon">✧</span>
+          <div>
+            <strong>Answers with context.</strong>
+            <small>Grounded in your sources</small>
+          </div>
+        </div>
+        <span className="orbit-spark">✦</span>
+      </div>
+      <div className="auth-story-foot">
+        <span /> Less searching. More understanding.
+      </div>
     </section>
   );
 }

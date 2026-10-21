@@ -55,22 +55,52 @@ export function LoginForms() {
     ["forgot", "Reset password"],
   ] as const;
 
+  const headings = {
+    signin: ["Welcome back.", "A clearer view of your day starts here."],
+    signup: ["Make room for clarity.", "Create your private workspace. We’ll verify your email first."],
+    forgot: ["Let’s get you back in.", "Enter your account email and we’ll send a password reset link."],
+  } as const;
+
   return (
     <div>
-      <div
-        role="tablist"
-        className="mb-5 grid grid-cols-3 rounded-lg bg-zinc-100 p-1 text-xs font-medium dark:bg-zinc-800"
-      >
+      <div className="auth-heading">
+        <p className="brand-eyebrow">YOUR KNOWLEDGE, TOGETHER</p>
+        <h1>{headings[tab][0]}</h1>
+        <p>{headings[tab][1]}</p>
+      </div>
+      <div role="tablist" aria-label="Account access" className="auth-tabs">
         {tabs.map(([id, label]) => (
           <button
             key={id}
             role="tab"
+            id={`tab-${id}`}
+            aria-controls={`panel-${id}`}
             aria-selected={tab === id}
+            tabIndex={tab === id ? 0 : -1}
+            onKeyDown={(event) => {
+              const index = tabs.findIndex(([value]) => value === id);
+              const next =
+                event.key === "ArrowRight"
+                  ? (index + 1) % tabs.length
+                  : event.key === "ArrowLeft"
+                    ? (index + tabs.length - 1) % tabs.length
+                    : event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? tabs.length - 1
+                        : null;
+              if (next === null) return;
+              event.preventDefault();
+              const [nextTab] = tabs[next as 0 | 1 | 2];
+              setTab(nextTab);
+              setStatus(null);
+              document.getElementById(`tab-${nextTab}`)?.focus();
+            }}
             onClick={() => {
               setTab(id);
               setStatus(null);
             }}
-            className={`rounded-md py-1.5 ${tab === id ? "bg-white shadow-sm dark:bg-zinc-950" : "text-zinc-500"}`}
+            className="auth-tab"
           >
             {label}
           </button>
@@ -79,6 +109,9 @@ export function LoginForms() {
 
       {tab === "signin" && (
         <form
+          role="tabpanel"
+          id="panel-signin"
+          aria-labelledby="tab-signin"
           className="space-y-4"
           onSubmit={(e) => {
             const f = fields(e);
@@ -97,6 +130,18 @@ export function LoginForms() {
             required
             maxLength={128}
           />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="auth-text-link"
+              onClick={() => {
+                setTab("forgot");
+                setStatus(null);
+              }}
+            >
+              Forgot password?
+            </button>
+          </div>
           <Button type="submit" disabled={busy} className="w-full">
             {busy ? "Signing in…" : "Sign in"}
           </Button>
@@ -105,6 +150,9 @@ export function LoginForms() {
 
       {tab === "signup" && (
         <form
+          role="tabpanel"
+          id="panel-signup"
+          aria-labelledby="tab-signup"
           className="space-y-4"
           onSubmit={(e) => {
             const f = fields(e);
@@ -114,16 +162,18 @@ export function LoginForms() {
             });
           }}
         >
-          <p className="text-sm text-zinc-500">Create a private workspace. We&apos;ll verify your email first.</p>
           <Field label="Email" name="email" type="email" autoComplete="email" required maxLength={320} />
           <Button type="submit" disabled={busy} className="w-full">
-            Send verification link
+            {busy ? "Sending…" : "Send verification link"}
           </Button>
         </form>
       )}
 
       {tab === "forgot" && (
         <form
+          role="tabpanel"
+          id="panel-forgot"
+          aria-labelledby="tab-forgot"
           className="space-y-4"
           onSubmit={(e) => {
             const f = fields(e);
@@ -135,7 +185,7 @@ export function LoginForms() {
         >
           <Field label="Account email" name="email" type="email" autoComplete="email" required maxLength={320} />
           <Button type="submit" disabled={busy} className="w-full">
-            Send reset link
+            {busy ? "Sending…" : "Send reset link"}
           </Button>
         </form>
       )}

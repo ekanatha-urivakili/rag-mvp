@@ -48,10 +48,6 @@ body {
   @apply border border-zinc-200 px-2 py-1 text-left dark:border-zinc-800;
 }
 
-.brand-hero {
-  background: linear-gradient(115deg, #134e4a, #312e81);
-  color: white;
-}
 select {
   appearance: none;
   padding-left: 0.75rem;
@@ -90,4 +86,126 @@ option {
 
 [data-theme="dark"] .text-zinc-500 {
   color: var(--color-zinc-400);
+}
+
+.brand-eyebrow {
+  @apply text-[10px] font-semibold tracking-[0.18em] text-violet-700 dark:text-violet-300;
+}
+.auth-page {
+  @apply flex min-h-dvh flex-col bg-[#faf9f6] text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100;
+}
+.auth-header {
+  @apply mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-5 py-6 sm:px-10;
+}
+.auth-layout {
+  @apply mx-auto grid w-full max-w-7xl flex-1 items-center gap-10 px-5 py-8 sm:px-10 lg:grid-cols-2 lg:gap-20 lg:py-10;
+}
+.auth-story {
+  @apply relative hidden self-stretch overflow-hidden rounded-[2rem] bg-[#eeebf8] px-10 pt-12 pb-8 lg:flex lg:flex-col dark:bg-[#1b172b];
+}
+.auth-story h2 {
+  @apply mt-6 text-[clamp(2.8rem,4.3vw,4.4rem)] leading-[1.06] font-medium tracking-[-0.055em];
+}
+.auth-story h2 > span {
+  @apply text-violet-700 dark:text-violet-300;
+}
+.auth-story-copy {
+  @apply mt-6 max-w-sm text-sm leading-7 text-zinc-600 dark:text-zinc-400;
+}
+.knowledge-orbit {
+  @apply relative mx-auto mt-5 h-64 w-full max-w-sm;
+}
+.orbit-ring {
+  @apply absolute top-0 left-1/2 size-64 -translate-x-1/2 rounded-full border border-violet-400/25;
+}
+.orbit-ring-inner {
+  @apply top-8 size-48;
+}
+.orbit-moon {
+  @apply absolute top-20 left-1/2 -translate-x-1/2 -rotate-12 rounded-[2rem] shadow-[0_20px_50px_-15px_#6d4aff66];
+}
+.orbit-note {
+  @apply absolute flex items-center gap-3 rounded-2xl border border-white/80 bg-white/95 p-4 shadow-[0_8px_30px_-15px_#45307940] dark:border-zinc-700 dark:bg-zinc-900;
+}
+.orbit-note-document {
+  @apply top-4 -left-3 -rotate-6;
+}
+.orbit-note-answer {
+  @apply right-0 bottom-0 rotate-3;
+}
+.orbit-note strong {
+  @apply block text-xs font-semibold;
+}
+.orbit-note small {
+  @apply mt-1 block text-[10px] text-zinc-500;
+}
+.note-icon {
+  @apply flex size-9 items-center justify-center rounded-xl bg-violet-100 text-xl text-violet-700 dark:bg-violet-950 dark:text-violet-300;
+}
+.orbit-spark {
+  @apply absolute top-8 right-4 text-3xl text-violet-500;
+}
+.auth-story-foot {
+  @apply mt-8 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400;
+}
+.auth-story-foot > span {
+  @apply size-1.5 rounded-full bg-violet-500;
+}
+.auth-form-side {
+  @apply mx-auto w-full max-w-[420px] py-3 lg:py-10;
+}
+.auth-card {
+  @apply rounded-3xl border border-zinc-200/80 bg-white p-6 shadow-[0_15px_60px_-35px_#2d204a40] sm:p-9 dark:border-zinc-800 dark:bg-zinc-900;
+}
+.auth-heading {
+  @apply mb-7;
+}
+.auth-heading h1,
+.auth-card form > h1 {
+  @apply mt-3 text-[1.8rem] leading-tight font-semibold tracking-[-0.04em];
+}
+.auth-heading > p:last-child {
+  @apply mt-3 text-sm leading-6 text-zinc-500;
+}
+.auth-tabs {
+  @apply mb-6 grid grid-cols-3 gap-1 border-b border-zinc-200 text-xs dark:border-zinc-700;
+}
+.auth-tab {
+  @apply min-h-11 border-b-2 border-transparent px-1 pb-3 font-medium text-zinc-500 transition-colors hover:text-violet-700 dark:hover:text-violet-300;
+}
+.auth-tab[aria-selected="true"] {
+  @apply border-violet-600 text-violet-700 dark:border-violet-400 dark:text-violet-300;
+}
+.auth-card input {
+  @apply min-h-12 rounded-xl border-zinc-200 bg-zinc-50/70 focus:border-violet-500 focus:ring-violet-500/20 dark:border-zinc-700 dark:bg-zinc-950;
+}
+.auth-card button[type="submit"] {
+  @apply min-h-12 rounded-xl bg-violet-700 text-white hover:bg-violet-600 dark:bg-violet-500 dark:text-white dark:hover:bg-violet-400;
+}
+.auth-text-link {
+  @apply text-xs font-medium text-violet-700 hover:underline dark:text-violet-300;
+}
+.auth-form-foot {
+  @apply mt-6 text-center text-[11px] leading-5 text-zinc-500;
+}
+.auth-footer {
+  @apply mx-auto flex w-full max-w-7xl flex-wrap justify-between gap-2 px-5 py-6 text-[11px] text-zinc-500 sm:px-10;
+}
+.home-brand {
+  @apply mx-auto flex size-24 items-center justify-center rounded-[2rem] bg-violet-50 sm:size-28 dark:bg-violet-950/40;
+}
+.home-action {
+  @apply rounded-2xl border border-zinc-200 bg-white p-5 text-sm transition-colors hover:border-violet-400 hover:bg-violet-50/50 dark:border-zinc-800 dark:bg-zinc-900/50 dark:hover:border-violet-500 dark:hover:bg-violet-950/30;
+}
+.home-action-icon {
+  @apply flex size-9 items-center justify-center rounded-xl bg-violet-100 text-xl text-violet-700 dark:bg-violet-950 dark:text-violet-300;
+}
+.receipt-icon {
+  @apply bg-teal-50 text-teal-800 dark:bg-teal-950 dark:text-teal-300;
+}
+.home-composer:focus-within {
+  @apply border-violet-400 ring-2 ring-violet-500/10;
+}
+.home-composer button[type="submit"] {
+  @apply bg-violet-700 text-white hover:bg-violet-600 dark:bg-violet-500 dark:hover:bg-violet-400;
 }
