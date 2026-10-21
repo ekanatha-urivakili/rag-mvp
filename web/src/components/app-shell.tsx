@@ -46,10 +46,7 @@ export function AppShell({ me, children }: { me: Me; children: React.ReactNode }
 }
 
 function WorkspaceLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const me = useMe();
   const drawer = useRef<HTMLDialogElement>(null);
-  const title = navigationFor(me.permissions, pathname).find((item) => item.active)?.label ?? "Workspace";
   return (
     <div className="flex h-dvh overflow-hidden">
       <a
@@ -81,10 +78,6 @@ function WorkspaceLayout({ children }: { children: React.ReactNode }) {
           >
             <NavIcon href="menu" />
           </button>
-          <div className="min-w-0">
-            <p className="text-base font-semibold">{title === "Home" ? "Moontig" : title}</p>
-            <p className="truncate text-xs text-zinc-500">{me.tenant.name}</p>
-          </div>
           <div className="ml-auto">
             <ThemeToggle />
           </div>
