@@ -11,6 +11,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# A venv activated in the caller's shell makes uv warn on every call; use the project's .venv.
+unset VIRTUAL_ENV
+
 UI_URL="http://localhost:3000"
 API_URL="http://localhost:8000"
 PROJECT="rag-mvp"

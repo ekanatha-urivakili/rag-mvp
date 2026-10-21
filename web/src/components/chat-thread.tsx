@@ -416,7 +416,7 @@ function Composer({
   return (
     <div className="shrink-0 px-4 pt-3 pb-1">
       <form
-        className="mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-200 bg-zinc-100 p-3 shadow-sm focus-within:ring-2 focus-within:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800"
+        className="mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
