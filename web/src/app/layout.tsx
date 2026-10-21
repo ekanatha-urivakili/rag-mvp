@@ -5,7 +5,8 @@ import { ThemeProvider } from "@/components/theme";
 
 export const metadata: Metadata = {
   title: "Moontig",
-  description: "Ask questions about your documents",
+  description:
+    "Your personal knowledge space. Organise documents and receipts, and find answers grounded in your sources.",
   referrer: "no-referrer",
 };
 
