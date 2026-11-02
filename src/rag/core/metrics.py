@@ -36,6 +36,11 @@ TOP_SCORE = Histogram(
 RETRIEVAL_DEGRADED = Counter("rag_retrieval_degraded_total", "Retrieval fell back to a weaker mode", ["kind"])
 FEEDBACK = Counter("rag_feedback_total", "Thumbs up/down submissions", ["rating"])
 
+INGESTION_DOCS = Counter("rag_ingestion_documents_total", "Ingested documents by kind and outcome", ["kind", "outcome"])
+INGESTION_DURATION = Histogram(
+    "rag_ingestion_duration_seconds", "Document ingestion duration", ["kind"], buckets=_LATENCY_BUCKETS
+)
+
 JOBS_QUEUED = Gauge("jobs_queued", "Queued jobs (backlog)", ["type"])
 JOBS_OLDEST_QUEUED = Gauge("jobs_oldest_queued_age_seconds", "Age of the oldest runnable queued job", ["type"])
 JOBS_FAILED_24H = Gauge("jobs_failed_24h", "Jobs that reached terminal failure in the last 24h", ["type"])

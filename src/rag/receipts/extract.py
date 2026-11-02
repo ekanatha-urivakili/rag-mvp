@@ -172,13 +172,15 @@ def normalize(x: ReceiptExtraction, provider: str, model: str) -> Receipt:
     )
 
 
-async def extract_receipt(image: Image | None, ocr_text: str, on_attempt: OnAttempt | None = None) -> Receipt | None:
+async def extract_receipt(
+    images: tuple[Image, ...], ocr_text: str, on_attempt: OnAttempt | None = None
+) -> Receipt | None:
     """Returns None when the model says the document is not a receipt. Raises LLMUnavailable if no model answers."""
     text = ocr_text.strip()[:20_000] or "(no text recognised)"
     user = Message(
         "user",
         f"OCR text (hint only, may contain errors):\n<ocr>\n{text.replace('</ocr>', '')}\n</ocr>",
-        images=(image,) if image else (),
+        images=images,
     )
     res = (
         await get_router()

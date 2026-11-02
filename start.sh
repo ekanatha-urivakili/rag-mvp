@@ -271,7 +271,6 @@ curl -sf "${API_URL}/readyz" >/dev/null || warn "API /readyz reports a dependenc
 step "Ready"
 cat <<EOF
   UI       ${UI_URL}
-  Legacy   optional: podman compose --profile legacy up -d ui (localhost:8501)
   API docs ${API_URL}/docs
   Mailpit  http://localhost:${MAILPIT_UI_PORT:-8025}   (signup verification, invites, password resets)
 

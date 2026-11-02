@@ -2,7 +2,7 @@
 
 Multi-tenant document Q&A with receipt extraction. Users upload documents and receipt photos, then ask questions in a chat UI. Answers are streamed, grounded in those documents, and cited. Access is controlled by tenant-scoped roles. This repo implements [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-The default UI is Next.js; Streamlit is available through the optional `legacy` Compose profile. See the [HLD](#high-level-design-hld) and [ERD](#entity-relationship-diagram-erd) below.
+The UI is Next.js. See the [HLD](#high-level-design-hld) and [ERD](#entity-relationship-diagram-erd) below.
 
 ## Features
 
@@ -12,10 +12,11 @@ The default UI is Next.js; Streamlit is available through the optional `legacy` 
 - Streamed answers over SSE, with citations validated against the retrieved chunks. Uncited answers become an explicit "not in your documents" response.
 - Document-scoped questions are supported through the chat API (`filters.doc_id`). Greetings and other messages that need no retrieval use a direct response path.
 - Sparse embedding failures fall back to dense retrieval; reranker failures retain retrieval ordering. Retrieved hits are checked against the tenant, ready status, and current document version in Postgres.
-- The UI shows the current step and the model in use, including fallbacks. Every answer records its provider, model, token usage and latency.
+- Choose the model and supported reasoning effort from the pill inside the chat composer. The configured OpenAI model is selected by default when its key is present. Open the model list and **Manage models & keys** to add private OpenAI/Anthropic keys or installed Ollama model IDs; the selection applies to analysis, replies, and summaries without falling back to another provider. See [model selection and encrypted key storage](docs/MODEL_SELECTION.md).
+- The UI shows the current step and the model in use. Every answer records its provider, model, token usage and latency.
 - Chat history: every chat is saved and listed by last activity, grouped by day, searchable by title, renameable and deletable. Open any past chat (`/c/{id}`) and keep asking; follow-ups use its earlier turns. Long chats load the latest 200 messages with "Load earlier".
 - Per-message thumbs up/down feedback.
-- Model routing with fallbacks (`config/models.yaml`): local Ollama first for orchestration, Claude → OpenAI → local for generation. Runs fully local with no cloud keys.
+- Deployment routing with fallbacks (`config/models.yaml`) remains available for background tasks and standalone graph/eval runs. Chat overrides orchestration and generation with the selected model. Runs fully local with no cloud keys when Ollama is selected.
 
 **Documents**
 
@@ -80,7 +81,6 @@ These are the technologies used by the implementation. Versions come from `pypro
 | UI styling and data | Tailwind CSS 4, TanStack Query, `react-markdown` | Utility styles support responsive themes; query caching and invalidation keep workspace lists current; Markdown displays answers without enabling raw HTML. |
 | BFF validation and sessions | Zod and `jose` | Zod validates server configuration; `jose` provides authenticated encryption for session cookies. Origin checks and an allowlisted proxy constrain browser requests. |
 | Transactional email | `aiosmtplib`, Jinja2; Mailpit locally | SMTP works through configured mail infrastructure; HTML templates autoescape values. Email jobs commit with business changes, and Mailpit captures local verification/invitation/reset messages. |
-| Optional legacy UI | Streamlit | Retains a Python-based interface for existing workflows; the default workspace UI is Next.js. |
 | Containers and local infrastructure | Podman + Compose, OCI Containerfiles | Reproduces the API, worker, web app, database, search, storage, and email services locally, with persistent volumes and constrained application containers. |
 | Quality and delivery checks | `uv`, Ruff, strict mypy, pytest; ESLint, Prettier, TypeScript, Vitest; GitHub Actions and dependency audits | Lockfiles make dependency resolution reproducible. CI checks types, formatting, behavior, builds, and dependencies, including integration tests with provisioned services. |
 | Observability and evaluation | OpenTelemetry (OTLP), Prometheus `prometheus-client`, structured JSON logs; retrieval metrics and an LLM faithfulness judge (offline and sampled online); Prometheus, Grafana and Jaeger in an optional compose profile | Vendor-neutral traces work with Jaeger locally or Langfuse; pull-based metrics read job and eval health from Postgres, so they stay correct across replicas. RAGAS is not used. |
@@ -91,7 +91,6 @@ These are the technologies used by the implementation. Versions come from `pypro
 flowchart TB
     browser["Browser / mobile browser"]
     client["Programmatic client"]
-    legacy["Optional Streamlit UI"]
     subgraph application["Application services"]
         web["Next.js UI + BFF<br/>Encrypted HttpOnly session, Origin checks, allowlisted proxy"]
         api["FastAPI /v1<br/>JWT / API keys, RBAC, tenant and owner checks, rate limits"]
@@ -114,7 +113,6 @@ flowchart TB
     browser -->|"Same-origin HTTP / SSE"| web
     web -->|"REST / SSE + bearer token"| api
     client -->|"JWT or API key"| api
-    legacy -->|"User JWT"| api
     api --> pg
     api -->|"Store raw uploads"| storage
     api --> ragGraph
@@ -345,7 +343,6 @@ Once it's running:
 | URL | What |
 | --- | --- |
 | http://localhost:3000 | Web UI. Use **Sign up**, or create an admin (below) |
-| http://localhost:8501 | Optional legacy Streamlit UI (`podman compose --profile legacy up -d ui`) |
 | http://localhost:8000/docs | OpenAPI (disabled when `ENV=prod`) |
 | http://localhost:8025 | Project Mailpit inbox (signup verification, invites and password resets). Override with `MAILPIT_UI_PORT` |
 
@@ -382,7 +379,6 @@ alembic upgrade head
 uvicorn rag.api.main:app --reload --no-server-header &
 python -m rag.worker &
 (cd web && npm ci && SESSION_SECRET=$SESSION_SECRET APP_ORIGIN=http://localhost:3000 API_URL=http://localhost:8000 npm run dev)   # http://localhost:3000
-(cd ui && API_URL=http://localhost:8000 streamlit run app.py)                                     # legacy, :8501
 ```
 
 ## API
@@ -409,8 +405,8 @@ For document answers, clients must use the SSE `answer` event to replace provisi
 
 ```bash
 ./start.sh test          # starts the test infrastructure, then runs everything below
-uv run ruff check src tests ui evals scripts loadtest
-uv run ruff format --check src tests ui evals scripts loadtest
+uv run ruff check src tests evals scripts loadtest
+uv run ruff format --check src tests evals scripts loadtest
 uv run mypy src   # mypy runs in strict mode
 uv run pytest            # unit tests, plus integration tests against the compose services (uses database rag_test)
 (cd web && npm run lint && npm run typecheck && npm test && npm run build)
@@ -477,9 +473,9 @@ The container image installs `libgl1` and `libglib2.0-0t64`, which OpenCV needs.
 
 `web/` is a Next.js 16 app that serves the UI and acts as a backend-for-frontend (BFF). Design and full OWASP mapping: [architecture §6](docs/ARCHITECTURE.md#6-ui-nextjs-bff).
 
-- **API tokens are inaccessible to browser JavaScript.** Sign-in goes through `/api/auth/*`; the BFF keeps the access and refresh tokens in one AES-256-GCM encrypted, `HttpOnly`, `SameSite=Strict` cookie (`__Host-` + `Secure` over https). Refresh is single-flight within one process; multiple web replicas require session affinity or shared refresh coordination.
+- **API tokens are inaccessible to browser JavaScript.** Sign-in goes through `/api/auth/*`; the BFF keeps the access and refresh tokens in one AES-256-GCM encrypted, `HttpOnly`, `SameSite=Strict` cookie (`__Host-` + `Secure` over https). Refresh is single-flight within one process; multiple web replicas require session affinity or `REFRESH_REUSE_GRACE_S` on the API (a short window, e.g. `10`, in which a just-rotated refresh token may be presented again while its successor is still live).
 - **Allowlisted proxy.** `/api/v1/*` forwards only listed method/path pairs with UUID-shaped IDs and streams JSON, multipart uploads and SSE. Actual bytes are capped at 16 KB for JSON and 30 MB for uploads. Queries over 2 KB return 414.
-- **Client identity.** `TRUSTED_PROXY_HOPS=0` ignores forwarded IPs by default: direct clients share the BFF's API IP bucket. Enable a positive hop count only behind a trusted ingress that overwrites/appends the actual peer IP and prevents direct access to the web service. A single such ingress normally uses `1`; Next.js does not append a hop to an existing header. Compose passes this setting to `web`. Never enable it for direct public access.
+- **Client identity.** `TRUSTED_PROXY_HOPS=0` ignores forwarded IPs by default: direct clients share the BFF's API IP bucket. Enable a positive hop count only behind a trusted ingress that overwrites/appends the actual peer IP and prevents direct access to the web service. A single such ingress normally uses `1`; Next.js does not append a hop to an existing header. Compose passes this setting to `web`. Never enable it for direct public access. With `ENV=prod`, `web` refuses to start unless `TRUSTED_PROXY_HOPS>=1`, since a shared BFF IP lets one client exhaust the per-IP auth limits for everyone.
 - **CSRF:** `SameSite=Strict` plus an exact `Origin` check on every mutating request.
 - **XSS:** per-request nonce CSP with `strict-dynamic`, no remote images, markdown rendered without raw HTML, and `dangerouslySetInnerHTML` banned by lint.
 - Env: `SESSION_SECRET` (generated by `start.sh`), `APP_ORIGIN` (must be https in prod), `API_URL`, `ENV`, `TRUSTED_PROXY_HOPS`. Compose maps the root `.env` setting `WEB_ORIGIN` to the web process's `APP_ORIGIN`.
@@ -488,7 +484,6 @@ Moontig uses a teal/indigo/amber logo, a home hero and workspace footer links. M
 
 Migration `0005` adds profile names and upload kinds, moves existing extracted receipts to the receipt library, and scopes file deduplication to each library. Take a backup before applying it with `.venv/bin/alembic upgrade head` (Compose runs upgrades on API startup). Downgrading is possible only when there are no duplicate file hashes across the two libraries; otherwise restore the pre-migration backup.
 
-Streamlit is now optional (`podman compose --profile legacy up -d ui`); the default launcher starts the Next.js workspace app.
 
 To repeat the live local workspace smoke test after starting the stack:
 
@@ -497,7 +492,6 @@ uv run python scripts/smoke_workspace.py
 ```
 
 It creates unique temporary workspaces, checks invitations through Mailpit, member roles/removal, key creation/revocation, receipt reads, audit records, permissions and CSRF, then removes its accounts/workspaces. The receipt fixture is seeded; `tests/integration/test_receipts.py` separately exercises upload and real OCR with model extraction faked. Run this against the local development stack with its matching host-side `DATABASE_URL`.
-Legacy Streamlit renders untrusted chat, citations and receipt text as plain text, preventing Markdown image requests from leaking document content. Rich answer Markdown remains available in the Next.js UI.
 
 ## OWASP coverage
 
@@ -536,7 +530,7 @@ The table below maps implemented controls to Web 2021 and API 2023 identifiers. 
 
 - **Metrics:** `GET /metrics` (Prometheus). Open in dev/test; in prod it needs `METRICS_TOKEN` (sent as a bearer token) or returns 404. It is not exposed through the web BFF. Includes LLM calls/latency/tokens per provider, `llm_fallback_total{purpose,from,to}`, chat TTFT and outcomes, retrieval degradation, feedback, job backlog/failures and online faithfulness.
 - **Traces:** set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` for Langfuse) to get a span per request, graph node, LLM attempt and worker job. Spans never include prompts or document text.
-- **Local stack:** `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 podman compose --profile observability up -d` starts Prometheus (`127.0.0.1:9090`, with alert rules), Grafana (`127.0.0.1:3001`, dashboard **Moontig RAG overview**) and Jaeger (`127.0.0.1:16686`). Config lives in [`ops/`](ops/).
+- **Local stack:** `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 podman compose --profile observability up -d` starts Prometheus (`127.0.0.1:9090`, with alert rules), Alertmanager (`127.0.0.1:9093`, alerts emailed to Mailpit), Grafana (`127.0.0.1:3001`, dashboard **Moontig RAG overview**) and Jaeger (`127.0.0.1:16686`). Config lives in [`ops/`](ops/).
 - **Online faithfulness:** `ONLINE_EVAL_SAMPLE_RATE=0.05` grades 5% of cited answers asynchronously with the `eval_judge` route (this sends the answer's context to that provider). Results land in `answer_evals` and on the dashboard.
 
 ## Operations
@@ -547,14 +541,13 @@ Procedures for provider outages, failing jobs, quality regressions, restore and 
 - **Load test:** `uvx locust -f loadtest/locustfile.py --host http://localhost:8000 --headless -u 10 -r 2 -t 5m` with `LOADTEST_EMAIL`/`LOADTEST_PASSWORD` of an existing account. It reports chat TTFT separately and exits non-zero when its p95 exceeds `TTFT_P95_TARGET_S` (default 3 s). Raise `RL_CHAT_PER_USER`/`RL_CHAT_PER_TENANT` on the target first.
 - **Re-embed or switch embedding model:** set `EMBEDDING_*`, then run `rag reindex --version 2`. The worker builds `chunks_v2` from Postgres (no re-parsing), atomically flips the `chunks_current` alias, and retains the previous collection for in-flight reads and manual rollback. Reindex serializes against ingestion/upload/delete, rebuilds an incomplete target on retry, and reads Postgres in bounded batches. Stop query traffic during embedding model/dimension changes; the API and worker need the same new embedding settings. Remove retired collections after the rollback window.
 - **Job retries:** 3 attempts with exponential backoff. Terminal ingestion failures mark the document `failed` and email the uploader. Re-uploading that file queues another attempt. Workers hold a dedicated job-row lock during processing, preventing lease expiry from reclaiming a live job. Both successful and terminally failed email jobs have their link payloads scrubbed.
-- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. The `web` service receives `API_URL`, `APP_ORIGIN`, `SESSION_SECRET`, `ENV` and `TRUSTED_PROXY_HOPS`; the legacy `ui` service only `API_URL`. Neither gets the backend env file or model volume. Provider keys and database/JWT/storage credentials stay in API/worker services.
+- **Secrets:** `.env` is git-ignored and `chmod 600`. In prod, inject them from a secret manager. The `web` service receives `API_URL`, `APP_ORIGIN`, `SESSION_SECRET`, `ENV` and `TRUSTED_PROXY_HOPS`. It does not get the backend env file or model volume. Provider keys and database/JWT/storage credentials stay in API/worker services.
 
 
 ## Review and validation
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and deployment considerations. Run the checks above for verification evidence on your checkout. Security mappings describe implemented controls, not an OWASP
-certification or a penetration-test result. The web UI sets its own CSP and security headers; the legacy Streamlit UI does not,
-so configure HTTPS and appropriate headers/query-string log redaction for it at the production ingress.
+certification or a penetration-test result. The web UI sets its own CSP and security headers; configure HTTPS and query-string log redaction at the production ingress.
 
 The API waits for local model warmup before serving. Ollama orchestration has a 30-second
 request timeout because ingestion can evict the chat model; warmup alone does not prevent that.

@@ -204,8 +204,44 @@ option {
   @apply bg-teal-50 text-teal-800 dark:bg-teal-950 dark:text-teal-300;
 }
 .home-composer:focus-within {
-  @apply border-violet-400 ring-2 ring-violet-500/10;
+  @apply border-zinc-300 dark:border-zinc-600;
 }
 .home-composer button[type="submit"] {
-  @apply bg-violet-700 text-white hover:bg-violet-600 dark:bg-violet-500 dark:hover:bg-violet-400;
+  @apply bg-blue-500 text-white hover:bg-blue-600 disabled:bg-zinc-200 disabled:text-zinc-400 disabled:opacity-100 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-600;
+}
+.home-composer > button {
+  border-radius: 9999px;
+}
+.chat-composer-input {
+  field-sizing: content;
+  max-height: 12rem;
+  scrollbar-width: thin;
+}
+
+.model-popover {
+  inset: auto;
+  --effort-track: #e7e7e7;
+}
+[data-theme="dark"] .model-popover {
+  --effort-track: #3f3f46;
+}
+.effort-slider {
+  appearance: none;
+  border: 1px solid rgb(0 0 0 / 5%);
+}
+.effort-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #d4d4d8;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+}
+.effort-slider::-moz-range-thumb {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #d4d4d8;
+  border-radius: 50%;
+  background: white;
 }

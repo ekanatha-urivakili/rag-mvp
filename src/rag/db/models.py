@@ -63,6 +63,21 @@ class User(Base):
     created_at: Mapped[datetime] = _created()
 
 
+class ModelConnection(Base):
+    __tablename__ = "model_connections"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(String(16))
+    model: Mapped[str] = mapped_column(String(160))
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created()
+    __table_args__ = (
+        CheckConstraint("provider in ('openai','anthropic','ollama')", name="ck_model_connection_provider"),
+        Index("ix_model_connections_owner", "tenant_id", "user_id"),
+    )
+
+
 class Membership(Base):
     __tablename__ = "memberships"
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
@@ -230,7 +245,9 @@ class Job(Base):
     created_at: Mapped[datetime] = _created()
     __table_args__ = (
         CheckConstraint(
-            "type in ('ingest_document','send_email','reindex','purge_document','judge_answer')", name="ck_job_type"
+            "type in ('ingest_document','send_email','reindex','purge_document','judge_answer',"
+            "'summarize_conversation')",
+            name="ck_job_type",
         ),
         CheckConstraint("status in ('queued','running','done','failed')", name="ck_job_status"),
         Index("ix_jobs_claim", "status", "run_after"),
@@ -254,9 +271,14 @@ class Conversation(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200))
+    model_id: Mapped[str | None] = mapped_column(String(80))
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = _created()
     # Last message activity; history is ordered and paginated by it.
     updated_at: Mapped[datetime] = _created()
+    # Rolling summary of the oldest `summarized_count` messages (those older than the HISTORY_TURNS window).
+    summary: Mapped[str | None] = mapped_column(Text)
+    summarized_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     __table_args__ = (Index("ix_conversations_owner_activity", "tenant_id", "user_id", "updated_at", "id"),)
 
 

@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from prometheus_client import start_http_server
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,7 @@ from rag.core.telemetry import setup_tracing, tracer
 from rag.db.session import get_sessionmaker
 from rag.email.handler import send_email
 from rag.evaluation.judge import judge_answer
+from rag.graph.summary import summarize_conversation
 from rag.ingestion.pipeline import ingest_document, on_ingest_failed, purge_document
 from rag.ingestion.reindex import reindex
 
@@ -34,6 +36,7 @@ HANDLERS: dict[str, Handler] = {
     "reindex": lambda db, _id, p: reindex(db, p),
     "purge_document": lambda db, _id, p: purge_document(db, p),
     "judge_answer": lambda db, _id, p: judge_answer(db, p),
+    "summarize_conversation": lambda db, _id, p: summarize_conversation(db, p),
 }
 ON_FAILURE: dict[str, FailureHook] = {"ingest_document": on_ingest_failed}
 
@@ -134,6 +137,8 @@ async def main() -> None:
     s = get_settings()
     configure_logging(s.log_level)
     setup_tracing(s, "rag-worker")
+    if s.worker_metrics_port > 0:
+        start_http_server(s.worker_metrics_port)
     await get_vectorstore().ensure_collection()
     await get_storage().ensure_bucket()
     stop = asyncio.Event()

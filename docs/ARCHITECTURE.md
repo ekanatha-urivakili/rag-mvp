@@ -89,7 +89,7 @@ Implementation evidence: the test suites and checks listed in the [README](../RE
 | Email | `aiosmtplib` + Jinja2 templates; **Mailpit** locally | Outbox via jobs table (§4.8) |
 | Observability | OpenTelemetry (OTLP) traces, Prometheus metrics, structured JSON logs | Trace backend is any OTLP receiver: Jaeger in the local `observability` profile, Langfuse via its OTLP endpoint. Prometheus + Grafana in the same profile |
 | Evaluation | Retrieval metrics + RAGAS (faithfulness, answer relevancy) | |
-| UI | Next.js 16 (App Router) + React 19 + TypeScript, Tailwind CSS 4, TanStack Query | Runs as a BFF in front of the API (§6). Receipts, Members and Settings are implemented in Next.js; Streamlit is an optional legacy profile |
+| UI | Next.js 16 (App Router) + React 19 + TypeScript, Tailwind CSS 4, TanStack Query | Runs as a BFF in front of the API (§6). Receipts, Members and Settings are implemented in Next.js |
 | Containers | **Podman** (rootless) + Compose spec (`compose.yaml`) | Same OCI images in prod |
 
 ---
@@ -241,7 +241,7 @@ class RAGState(TypedDict):
 
 ### 4.3 LLM Provider Layer & Model Routing
 
-Three providers, one interface, routing by **purpose** (not by node), with ordered fallbacks.
+Three providers, one interface, routing by **purpose** (not by node), with ordered deployment fallbacks. Interactive chat overrides both orchestration and generation with the user's selected model; OpenAI is selected by default when configured. Personal connections are scoped to user and tenant, with encrypted write-only provider keys. Selection is request-scoped and remembered on the conversation, including its background summaries. See [chat model selection](MODEL_SELECTION.md) for the API, encryption, and deployment requirements.
 
 ```python
 class LLM(Protocol):
@@ -296,7 +296,7 @@ Rules:
 - Swapping a model is a config change, then an **eval run** — the eval suite can run the `generation` route against each provider and report the results side by side.
 - Sensitive tenants can later be pinned to a local-only route (`generation: [ollama/...]`) — no code change.
 
-**Why local Ollama for orchestration?** These calls are short, structured, and on the critical path before generation: a local 4B model on Apple Silicon is fast, free, and keeps raw user questions local. Cloud fallback covers quality failures and "Ollama is down".
+**Why support local Ollama for orchestration?** These calls are short, structured, and on the critical path before generation: a local 4B model on Apple Silicon can keep raw user questions local. Deployment routes retain cloud fallbacks; a chat selection instead pins all chat model calls to the chosen provider without fallback.
 
 ### 4.4 Prompting rules (generation)
 
@@ -331,12 +331,12 @@ chunks           (id, document_id, version, chunk_index, text, heading_path,
                   page_start, page_end, token_count)
 
 -- Background work
-jobs             (id, type[ingest_document|send_email|reindex|purge_document|judge_answer], payload JSONB,
+jobs             (id, type[ingest_document|send_email|reindex|purge_document|judge_answer|summarize_conversation], payload JSONB,
                   status[queued|running|done|failed], attempts, run_after,
                   locked_at, finished_at, error, created_at)
 
 -- Chat
-conversations    (id, tenant_id, user_id, title, created_at, updated_at)
+conversations    (id, tenant_id, user_id, title, created_at, updated_at, summary, summarized_count)
                   INDEX (tenant_id, user_id, updated_at, id)      -- history list + keyset paging
 messages         (id, conversation_id, role, content, citations JSONB, trace_id,
                   prompt_version, provider, model, fallback_used, tokens_in,
@@ -382,19 +382,22 @@ Single collection with `tenant_id` partitioning; the filter is enforced inside t
 | `POST` | `/v1/auth/logout` | authenticated | Revoke refresh token |
 | `POST` | `/v1/auth/password/forgot` | public | Always `202` (no account enumeration); emails reset link if user exists |
 | `POST` | `/v1/auth/password/reset` | reset token | Set new password; revokes all refresh tokens |
-| `POST` | `/v1/invitations` | `member:manage` | `{email, role}` → emails invite link |
+| `POST` | `/v1/invitations` | `member:manage` (user only) | `{email, role}` → emails invite link |
 | `POST` | `/v1/invitations/accept` | invite token | Create user, or attach an existing account after verifying its current password; + membership. 5 attempts per link per hour |
-| `DELETE` | `/v1/invitations/{id}` | `member:manage` | Revoke a pending invitation (tenant-scoped, audited) |
+| `DELETE` | `/v1/invitations/{id}` | `member:manage` (user only) | Revoke a pending invitation (tenant-scoped, audited) |
 | `GET` | `/v1/me` | authenticated | User, current tenant, role, permissions (UI uses this to show/hide actions) |
-| `GET` | `/v1/members` | `member:manage` | List members |
-| `PATCH` | `/v1/members/{user_id}` | `member:manage` | Change role (cannot demote the last admin) |
-| `DELETE` | `/v1/members/{user_id}` | `member:manage` | Remove membership |
-| `GET/POST/DELETE` | `/v1/api-keys` | `apikey:manage` | Service-account keys with a role |
+| `PATCH` | `/v1/me` | authenticated (user only) | `{name}` update profile display name |
+| `GET` | `/v1/members` | `member:manage` (user only) | List members |
+| `PATCH` | `/v1/members/{user_id}` | `member:manage` (user only) | Change role (cannot demote the last admin) |
+| `DELETE` | `/v1/members/{user_id}` | `member:manage` (user only) | Remove membership |
+| `GET/POST/DELETE` | `/v1/api-keys` | `apikey:manage` (user only) | Service-account keys with a role (human admin session required to prevent key self-escalation) |
 | `GET` | `/v1/audit-log` | `audit:read` | Paginated |
 | `POST` | `/v1/documents` | `document:write` | Multipart upload → `202 {document_id, job_id}` |
 | `GET` | `/v1/documents`, `/v1/documents/{id}` | `document:read` | List / status, error, chunk count |
 | `DELETE` | `/v1/documents/{id}` | `document:delete` | Remove doc + vectors |
-| `POST` | `/v1/chat` | `chat:use` | `{conversation_id?, message, filters?}` → **SSE stream**. With `conversation_id`, continues that conversation |
+| `POST` | `/v1/receipts` | `document:write` | Multipart upload of receipt PDF/image → `202 {document_id, job_id}` |
+| `GET` | `/v1/receipts`, `/v1/receipts/{id}` | `document:read` | Paginated extracted receipts / receipt detail |
+| `POST` | `/v1/chat` | `chat:use` (user only) | `{conversation_id?, message, filters?}` → **SSE stream**. With `conversation_id`, continues that conversation |
 | `GET` | `/v1/conversations?limit&q&before&before_id` | `chat:use` (own only) | History, most recently active first; title search; keyset cursor `(updated_at, id)` |
 | `GET` | `/v1/conversations/{id}?limit&before` | `chat:use` (own only) | Latest `limit` messages (≤ 500) oldest-first + `has_more`; `before` loads earlier ones |
 | `PATCH` | `/v1/conversations/{id}` | `chat:use` (own only) | `{title}` rename |
@@ -442,7 +445,7 @@ async def upload(
 ) -> UploadAccepted: ...
 ```
 
-- `RequestContext(user_id, tenant_id, role)` is passed into use cases and repositories; every tenant-owned query filters by `ctx.tenant_id`. Conversations additionally filter by `ctx.user_id` — **admins cannot read other users' chats**.
+- `RequestContext(user_id, tenant_id, role, api_key_id)` is passed into use cases and repositories; every tenant-owned query filters by `ctx.tenant_id`. Conversations additionally filter by `ctx.user_id` — **admins cannot read other users' chats**. Service-account API keys have `user_id=None` and `api_key_id=<uuid>`, and are rejected (`403`) on `user_only=True` routes (`members`, `invitations`, `api-keys`, `chat`, `conversations`, `PATCH /v1/me`, `auth/switch-tenant`, `auth/password/change`, `auth/logout`).
 - Guardrails: the last admin of a tenant cannot be demoted or removed; users cannot change their own role.
 - **Audit log** records: login failures (rate-limited), invites, role changes, member removal, API key create/revoke, document delete.
 
@@ -479,7 +482,7 @@ SMTP_HOST=<provider> SMTP_PORT=587   SMTP_TLS=true    SMTP_USER/SMTP_PASSWORD fr
 ```text
 rag-mvp/
 ├── pyproject.toml
-├── compose.yaml                # Podman: api, worker, web, ui (legacy), postgres, qdrant, objectstore, mailpit
+├── compose.yaml                # Podman: api, worker, web, postgres, qdrant, objectstore, mailpit
 ├── Containerfile               # one image; api / worker / ui chosen by command
 ├── .env.example
 ├── config/models.yaml          # model routes + fallbacks
@@ -496,7 +499,7 @@ rag-mvp/
 │   ├── graph/                  # state, nodes, graph builder, prompts/
 │   ├── evaluation/             # LLM judge shared by evals and the judge_answer job
 │   ├── email/                  # templates/, send_email job handler
-│   ├── worker/                 # job loop, handlers (ingest_document, send_email, reindex, purge_document, judge_answer)
+│   ├── worker/                 # job loop, handlers (ingest_document, send_email, reindex, purge_document, judge_answer, summarize_conversation)
 │   ├── adapters/
 │   │   ├── llm/                # base.py (LLM protocol), ollama.py, anthropic.py, openai.py, router.py
 │   │   ├── embedder.py, vectorstore.py, reranker.py, storage.py, mailer.py
@@ -513,7 +516,6 @@ rag-mvp/
 │       ├── components/         # workspace shell, chat, documents, receipts, members, keys/audit
 │       └── lib/                # session (JWE cookie), security (CSRF, allowlist, IP), upstream, SSE parser
 │   └── e2e/                    # Playwright browser end-to-end tests (Mailpit-backed auth flows)
-├── ui/                         # Streamlit (optional legacy UI)
 ├── evals/
 │   ├── golden.jsonl            # {question, expected_doc_ids, reference_answer}
 │   └── run_eval.py             # --route generation --provider anthropic|openai|ollama
@@ -552,11 +554,11 @@ sequenceDiagram
 | Search | Case-insensitive title match (`ILIKE`, wildcards escaped), ≤ 100 chars. Full-text search over message bodies is deferred until users ask for it (needs a `tsvector` index on `messages`). |
 | Opening a long chat | Latest `limit` messages (default 200, max 500) plus `has_more`; "Load earlier" pages backwards by `created_at`. Bounded response size (OWASP API4). |
 | Continuing | `POST /v1/chat` with `conversation_id`. The graph receives the last `HISTORY_TURNS` messages; `analyze_query` condenses them into a standalone query, so follow-ups ("and the second one?") retrieve correctly no matter how old the chat is. |
-| Context growth | Only a fixed window of turns is sent to models, so cost and latency don't grow with chat length. A rolling per-conversation summary (one `orchestration` call when the window slides) is the next step if evals show long-chat follow-ups degrading. |
+| Context growth | Only a fixed window of turns is sent to models, so cost and latency don't grow with chat length. Messages that slide out of the window are folded into `conversations.summary` by the `summarize_conversation` worker job (one `orchestration` call per slide, after the answer is saved, so it adds no latency). `analyze_query` and `respond_direct` receive the summary as delimited, escaped data. |
 | Rename / delete | `PATCH {title}`; `DELETE` is a hard delete with `ON DELETE CASCADE` to messages and feedback (chat content is the user's data, not an audit record). |
 | Access | Every query filters by `tenant_id` **and** `user_id`; another user's or tenant's ID is a 404, identical to a missing one. Admins cannot read, rename, delete or continue other users' chats. Covered by the RBAC matrix and `tests/integration/test_conversations.py`. |
 | Workspace switch | Conversations are tenant-scoped; switching workspace shows that workspace's history only. |
-| Interrupted answers | The user turn is committed before streaming. If the stream fails or the user stops it, the assistant turn is missing and the next turn simply continues; history stays consistent. |
+| Interrupted answers | The user turn is committed before streaming. If the stream fails or the user stops it, any streamed text is saved as a partial assistant turn (`debug.partial`); consecutive same-role turns are merged before they reach a model, so strict alternating-role APIs never reject the history. |
 
 ---
 
@@ -578,7 +580,7 @@ sequenceDiagram
 - **RBAC matrix test**: a parametrized test hits every route with every role and asserts allowed/denied — new routes without a `require(...)` fail CI.
 - Upload validation: allow-listed MIME types (sniffed, not trusted from header), size cap (e.g. 25 MB), filename sanitization.
 - Prompt injection: retrieved content delimited and labelled as data; no side-effecting tools in MVP.
-- Data egress: document chunks go to the `generation` provider (Anthropic/OpenAI); orchestration steps stay local by default. Documented per route so tenants can be pinned to local-only later.
+- Data egress: interactive chat sends questions and relevant document excerpts to the selected provider; the model picker identifies the provider before sending. Background receipt extraction, embeddings, and optional evaluation retain their deployment routes. Selecting Ollama for chat does not change those independent services.
 - Secrets (provider API keys, JWT secret, SMTP creds) via env / secret manager; never returned to the UI; `.env` git-ignored.
 - No passwords, tokens, prompts or document text in application logs (traces in Langfuse with access control).
 - Browser-facing controls (BFF token custody, CSRF, CSP, XSS-safe rendering) are in §6.3.
@@ -587,7 +589,7 @@ sequenceDiagram
 
 - **Traces** (OpenTelemetry, OTLP/HTTP; on when `OTEL_EXPORTER_OTLP_ENDPOINT` is set): one trace per request with a span per graph node (`rag.node.*`) and per LLM attempt (`llm.complete`/`llm.stream` with `gen_ai.*` provider, model and token attributes, outcome and route position), plus one span per worker job. Spans carry identifiers, scores and token counts, never prompts or document text. `trace_id` is on every JSON log line and stored on each assistant message. Per-message SSE spans are suppressed so a streamed answer is one span.
 - **Per message** (Postgres): provider, model, `fallback_used`, prompt version, tokens, latency, and in dev the graph path and rerank scores.
-- **Metrics** (`GET /metrics`, Prometheus): `http_requests_total` / `http_request_duration_seconds` by route template; `llm_requests_total{purpose,provider,model,outcome}`, `llm_request_duration_seconds`, `llm_tokens_total`, `llm_fallback_total{purpose,from,to}` (`to="none"` = route exhausted); `rag_time_to_first_token_seconds`, `rag_answer_duration_seconds`, `rag_answers_total{outcome}` (answered, direct, insufficient_context, error), `rag_top_rerank_score`, `rag_retrieval_degraded_total{kind}`, `rag_feedback_total{rating}`. Job backlog/age/terminal failures and 24 h online faithfulness/relevancy are read from Postgres at scrape time, so every replica reports the same values (aggregate with `max`).
+- **Metrics** (`GET /metrics`, Prometheus): `http_requests_total` / `http_request_duration_seconds` by route template; `llm_requests_total{purpose,provider,model,outcome}`, `llm_request_duration_seconds`, `llm_tokens_total`, `llm_fallback_total{purpose,from,to}` (`to="none"` = route exhausted); `rag_time_to_first_token_seconds`, `rag_answer_duration_seconds`, `rag_answers_total{outcome}` (answered, direct, insufficient_context, error), `rag_top_rerank_score`, `rag_retrieval_degraded_total{kind}`, `rag_feedback_total{rating}`. Job backlog/age/terminal failures and 24 h online faithfulness/relevancy are read from Postgres at scrape time, so every replica reports the same values (aggregate with `max`). The worker serves its own registry on `:8001/metrics` (`WORKER_METRICS_PORT`, `0` disables; internal network only) so `llm_*` for the `receipt_extraction` and `eval_judge` routes and `rag_ingestion_documents_total{kind,outcome}` / `rag_ingestion_duration_seconds{kind}` are scraped; Prometheus scrapes `worker:8001`.
 - **Dashboards/alerts** (`ops/`): API down, 5xx ratio (excluding health checks and scrapes), p95 TTFT > 3 s, chat error rate, **fallback rate per route** (rising = Ollama or a provider is unhealthy), exhausted routes, `insufficient_context` rate, thumbs-down rate, job failures by completion time and stale backlog, online faithfulness < 0.90. Each alert maps to a [runbook](RUNBOOKS.md). The local profile evaluates rules only; notification delivery requires a separately configured Alertmanager and receivers.
 
 ### 5.4 Evaluation
@@ -641,7 +643,7 @@ Implementation verification (20 October 2026): 72 frontend unit tests and 170 ba
 
 - **Login** (`POST /api/auth/login`): the BFF calls `/v1/auth/login`, then stores `{access, refresh, access_exp}` in one cookie encrypted with **JWE `dir` + A256GCM** (key = SHA-256 of `SESSION_SECRET`). Response body is `{ok: true}`. Browser JavaScript cannot read the tokens; XSS could still perform actions using the session.
 - **Cookie**: `HttpOnly`, `SameSite=Strict`, `Path=/`, 14-day max-age; `Secure` + `__Host-` prefix whenever `WEB_ORIGIN` is https (prod requires it).
-- **Refresh**: `proxy.ts` refreshes when the access token has < 60 s left, rewrites the cookie on both the forwarded request and the response, so server components and route handlers see the new token. Refresh tokens rotate and **reuse revokes the whole family** (§4.7), so concurrent requests holding the same expiring cookie share one in-flight refresh, and the result is reused for 60 s. That cache is per process: run web replicas with **sticky sessions** (or move the cache to Redis) before scaling out. API unreachable ≠ invalid: only a 401 from `/v1/auth/refresh` clears the cookie.
+- **Refresh**: `proxy.ts` refreshes when the access token has < 60 s left, rewrites the cookie on both the forwarded request and the response, so server components and route handlers see the new token. Refresh tokens rotate and **reuse revokes the whole family** (§4.7), so concurrent requests holding the same expiring cookie share one in-flight refresh, and the result is reused for 60 s. That cache is per process: before scaling out, run web replicas with **sticky sessions** or set the API's `REFRESH_REUSE_GRACE_S` (e.g. `10`), which lets a just-rotated token refresh again within that window while its successor is still live instead of revoking the family. Logout and family revocation still win. API unreachable ≠ invalid: only a 401 from `/v1/auth/refresh` clears the cookie.
 - **Logout / workspace switch**: revoke the refresh family at the API, then clear/replace the cookie. Switching workspace revokes the old workspace's session.
 
 ### 6.3 OWASP mapping (Web 2021 / API 2023)
@@ -659,12 +661,12 @@ Implementation verification (20 October 2026): 72 frontend unit tests and 170 ba
 | **A08** Integrity | Lockfile installs (`npm ci --ignore-scripts` in the image); no third-party scripts or CDNs. |
 | **A09** Logging | BFF logs no bodies, tokens or cookies; the API's request ID is passed through (`X-Request-ID`). |
 | **A10 / API7** SSRF | The upstream origin is fixed server config (`API_URL`); user input only selects an allowlisted path, never a host. |
-| **API4** Resource consumption | Auth and proxied JSON bodies capped at 16 KB; uploads at 30 MB (actual stream bytes, including chunked bodies). Queries over 2 KB return 414. Upstream timeout 30 s (chat: 5 min); browser disconnects cancel upstream work. Forwarded IPs are ignored by default (`TRUSTED_PROXY_HOPS=0`); users share the BFF IP bucket until trusted ingress is configured. API refresh is limited to 120 attempts/IP/minute by default. |
+| **API4** Resource consumption | Auth and proxied JSON bodies capped at 16 KB; uploads at 30 MB (actual stream bytes, including chunked bodies). Queries over 2 KB return 414. Upstream timeout 30 s (chat: 5 min); browser disconnects cancel upstream work. Forwarded IPs are ignored by default (`TRUSTED_PROXY_HOPS=0`), so in dev users share the BFF IP bucket; `ENV=prod` requires `TRUSTED_PROXY_HOPS>=1`. Password reset and signup verification are also limited per link token. API refresh is limited to 120 attempts/IP/minute by default. |
 
 ### 6.4 Not exposed to end users
 
 - Model/temperature selection (server config).
-- Debug details (graph path, rewritten query, scores) stay in the dev-only API `debug` event and the legacy UI; the Next.js UI doesn't render them.
+- Debug details (graph path, rewritten query, scores) stay in the dev-only API `debug` event; the Next.js UI doesn't render them.
 
 ---
 
@@ -696,7 +698,6 @@ podman compose exec api rag admin create --email you@example.com --tenant demo
 | `api` | app image | 8000 | `uvicorn rag.api.main:app` |
 | `worker` | app image | — | `python -m rag.worker`; reranker model cached in a volume |
 | `web` | `web/Containerfile` | 3000 | Next.js UI + BFF; only service the browser uses; reaches `api` over the private `bff` network (fixed IP `172.31.250.2`, the only address the API trusts for `X-Forwarded-For`) |
-| `ui` | app image | 8501 | Optional legacy Streamlit; start with `--profile legacy` |
 | `postgres` | `postgres:16` | 5432 | named volume, healthcheck |
 | `qdrant` | `qdrant/qdrant` | 6333, 6334 | named volume |
 | `objectstore` | `rustfs/rustfs` | 9000, 9001 | named volume, S3-compatible |
@@ -715,7 +716,7 @@ Podman notes:
 
 Same OCI image (built with `podman build`) deployed to a PaaS, or a single VM running **Podman Quadlet** (systemd-managed containers). Managed Postgres; Qdrant Cloud or self-hosted with snapshots; S3; real SMTP provider instead of Mailpit (env change only). Ollama on a GPU host if orchestration stays local in prod — otherwise point the `orchestration` route at Claude Haiku via config. Migrations run as a release step.
 
-The `web` image runs behind the HTTPS ingress; keep the API private (with separately authenticated service-account access if needed). Set `ENV=prod`, an HTTPS `WEB_ORIGIN`, and matching `PUBLIC_UI_URL`. Leave `TRUSTED_PROXY_HOPS=0` for direct access; set it to the number of trusted ingress hops that overwrite/append the actual peer IP, normally `1` for one ingress. Next.js preserves an existing `X-Forwarded-For` header and does not add a hop. Prevent direct public access to `web` when enabling forwarded identity. Set the API's `FORWARDED_ALLOW_IPS` to the web replicas' addresses. Legacy Streamlit also needs its own HTTPS/header policy; its untrusted output is rendered as plain text.
+The `web` image runs behind the HTTPS ingress; keep the API private (with separately authenticated service-account access if needed). Set `ENV=prod`, an HTTPS `WEB_ORIGIN`, and matching `PUBLIC_UI_URL`. Set `TRUSTED_PROXY_HOPS` to the number of trusted ingress hops that overwrite/append the actual peer IP, normally `1` for one ingress; `web` refuses to start with `ENV=prod` and `TRUSTED_PROXY_HOPS=0`, because every browser would then share the BFF's IP in the API's per-IP auth rate limits (one client could lock out all logins, signups and resets). Next.js preserves an existing `X-Forwarded-For` header and does not add a hop. Prevent direct public access to `web` when enabling forwarded identity. Set the API's `FORWARDED_ALLOW_IPS` to the web replicas' addresses.
 
 ### 7.3 Scale path (only when a metric demands it)
 
@@ -782,10 +783,10 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 
 - **Done in this step:** migration `0004` (`conversations.updated_at`, indexes); history list ordering, keyset paging, title search, rename, delete, bounded message window with "load earlier"; tests for ordering, paging, search, rename/delete cascade, continuation context, and owner-only access.
 - **Done in this step:** `web/` BFF (session cookie, refresh single-flight, allowlisted proxy, CSRF, CSP nonce, security headers); auth flows; chat with history sidebar and continuation; documents. CI job: lint, typecheck, format, unit tests, build, `npm audit`.
-- **Implemented:** Receipts, Members (invitations/roles/removal), Settings (API keys/audit history), permission-aware responsive navigation, and the corresponding BFF allowlist. Streamlit is optional; the default launcher serves all workspace features in Next.js.
+- **Implemented:** Receipts, Members (invitations/roles/removal), Settings (API keys/audit history), permission-aware responsive navigation, and the corresponding BFF allowlist. The Streamlit UI has been removed; Next.js serves all workspace features.
 - **Implemented (Revision 5):** Playwright browser end-to-end tests in CI (`web/e2e`).
-- **Next:** retire the legacy Streamlit UI when no longer needed; rolling conversation summary if long-chat evals require it.
-- **Exit:** all workspace pages have Next.js equivalents and browser CI coverage (implemented). Removal of legacy code remains outstanding.
+- **Done:** legacy Streamlit UI removed; rolling conversation summary (§4.10).
+- **Exit:** all workspace pages have Next.js equivalents and browser CI coverage, and the legacy Streamlit code is removed (done).
 
 ### Phase 6 — Hardening & Launch (Week 7)
 

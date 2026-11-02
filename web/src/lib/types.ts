@@ -24,7 +24,26 @@ export type Message = {
   created_at: string;
 };
 
-export type Conversation = { id: string; title: string; created_at: string; updated_at: string };
+export type Conversation = {
+  id: string;
+  title: string;
+  model_id?: string | null;
+  reasoning_effort?: ReasoningEffort | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatModel = {
+  id: string;
+  provider: "openai" | "anthropic" | "ollama";
+  model: string;
+  source: "server" | "personal";
+  reasoning_efforts: ReasoningEffort[];
+};
+
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+export type ChatModels = { items: ChatModel[]; default_id: string | null };
 
 export type ConversationDetail = Conversation & { messages: Message[]; has_more: boolean };
 

@@ -5,14 +5,18 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
+import anyio
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag.adapters.llm.base import ReasoningEffort
+from rag.adapters.llm.connections import ChatSelection, apply_effort, resolve_chat_model
+from rag.adapters.llm.router import get_router
 from rag.api.schemas import (
     ChatIn,
     ConversationDetailOut,
@@ -33,6 +37,7 @@ from rag.db.models import Conversation, Feedback, Message
 from rag.db.session import get_sessionmaker
 from rag.domain.models import ChatTurn, RequestContext
 from rag.graph.graph import INSUFFICIENT, PROMPT_VERSION, RAGState, build_graph
+from rag.graph.summary import maybe_enqueue_summary, message_count
 from rag.worker.queue import enqueue
 
 log = logging.getLogger(__name__)
@@ -71,10 +76,24 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
     if body.conversation_id:
         # Continuing an existing chat: it moves to the top of the history list.
         conv = await _own_conversation(db, ctx, body.conversation_id)
+        selection = await resolve_chat_model(db, ctx, body.model_id or conv.model_id)
+        effort = body.reasoning_effort
+        if effort is None and selection.id == conv.model_id:
+            effort = cast(ReasoningEffort | None, conv.reasoning_effort)
+        selection = apply_effort(selection, effort)
+        conv.model_id = selection.id
+        conv.reasoning_effort = effort
         await db.execute(update(Conversation).where(Conversation.id == conv.id).values(updated_at=func.now()))
     else:
+        selection = await resolve_chat_model(db, ctx, body.model_id)
+        selection = apply_effort(selection, body.reasoning_effort)
         conv = Conversation(
-            id=uuid.uuid4(), tenant_id=ctx.tenant_id, user_id=ctx.user_id, title=body.message[:80].replace("\n", " ")
+            id=uuid.uuid4(),
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            title=body.message[:80].replace("\n", " "),
+            model_id=selection.id,
+            reasoning_effort=body.reasoning_effort,
         )
         db.add(conv)
         await db.flush()
@@ -83,7 +102,7 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
         await db.execute(
             select(Message.role, Message.content)
             .where(Message.conversation_id == conv.id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(s.history_turns)
         )
     ).all()
@@ -92,7 +111,12 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
     db.add(Message(id=question_id, conversation_id=conv.id, role="user", content=body.message))
     await db.commit()
 
-    filters = {"doc_id": str(body.filters.doc_id)} if body.filters and body.filters.doc_id else None
+    filters: dict[str, str] = {}
+    if body.filters:
+        if body.filters.doc_id:
+            filters["doc_id"] = str(body.filters.doc_id)
+        if body.filters.category:
+            filters["category"] = body.filters.category
     state: RAGState = {
         "tenant_id": str(ctx.tenant_id),
         "user_id": str(ctx.user_id),
@@ -100,16 +124,29 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
         "question": body.message,
         "question_message_id": str(question_id),
         "history": history,
-        "filters": filters or {},
+        "summary": conv.summary or "",
+        "filters": filters,
         "path": [],
         "models_used": [],
     }
     trace_id = current_trace_id() or request_id_var.get() or uuid.uuid4().hex
     return StreamingResponse(
-        _run(state, conv.id, trace_id, started),
+        _run_selected(selection, state, conv.id, trace_id, started),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+async def _run_selected(
+    selection: ChatSelection,
+    state: RAGState,
+    conversation_id: uuid.UUID,
+    trace_id: str,
+    started: float,
+) -> AsyncIterator[str]:
+    async with get_router().select_chat(selection.entry, selection.api_key):
+        async for event in _run(state, conversation_id, trace_id, started):
+            yield event
 
 
 def _outcome(path: list[str], answer: str) -> str:
@@ -133,9 +170,41 @@ def _maybe_judge(db: AsyncSession, final: dict[str, Any], message_id: uuid.UUID,
     enqueue(db, "judge_answer", {"message_id": str(message_id), "question_message_id": question_id, "chunks": refs})
 
 
+async def _persist_partial_answer(conversation_id: uuid.UUID, content: str, trace_id: str, t0: float) -> None:
+    text = content.strip()
+    if not text:
+        return
+    try:
+        async with get_sessionmaker()() as db:
+            live = (
+                await db.execute(select(Conversation.id).where(Conversation.id == conversation_id).with_for_update())
+            ).scalar_one_or_none()
+            if live is None:
+                return
+            db.add(
+                Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=content,
+                    citations=[],
+                    trace_id=trace_id,
+                    prompt_version=PROMPT_VERSION,
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                    debug={"partial": True},
+                )
+            )
+            await db.execute(
+                update(Conversation).where(Conversation.id == conversation_id).values(updated_at=func.now())
+            )
+            await db.commit()
+    except Exception:
+        log.warning("chat_partial_persist_failed", exc_info=True)
+
+
 async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, started: float) -> AsyncIterator[str]:
     t0 = time.perf_counter()
     final: dict[str, Any] = {}
+    streamed: list[str] = []
     first_text = True
     try:
         async for mode, chunk in build_graph().astream(
@@ -155,21 +224,29 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, start
                 if first_text:
                     TTFT.observe(time.perf_counter() - started)
                     first_text = False
+                streamed.append(chunk["text"])
                 yield _sse("token", {"text": chunk["text"]})
             elif kind == "answer":
                 yield _sse("answer", {"text": chunk["text"]})
             elif kind == "citations":
                 yield _sse("citations", chunk["citations"])
     except LLMUnavailable:
+        await _persist_partial_answer(conversation_id, "".join(streamed), trace_id, t0)
         ANSWERS.labels("error").inc()
         log.exception("chat_llm_unavailable")
         yield _sse("error", {"code": "llm_unavailable", "message": "The language model is unavailable. Try again."})
         return
     except Exception:
+        await _persist_partial_answer(conversation_id, "".join(streamed), trace_id, t0)
         ANSWERS.labels("error").inc()
         log.exception("chat_failed")
         yield _sse("error", {"code": "internal_error", "message": "Something went wrong.", "trace_id": trace_id})
         return
+    except BaseException:
+        # Client disconnect/Stop cancels this task; shield the save so the streamed text survives a reload.
+        with anyio.CancelScope(shield=True):
+            await _persist_partial_answer(conversation_id, "".join(streamed), trace_id, t0)
+        raise
 
     usages = final.get("models_used", [])
     answer_usage = usages[-1] if usages else None
@@ -204,6 +281,10 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, start
         db.add(msg)
         await db.flush()
         _maybe_judge(db, final, msg.id, state["question_message_id"])
+        summarized = (
+            await db.execute(select(Conversation.summarized_count).where(Conversation.id == conversation_id))
+        ).scalar_one()
+        maybe_enqueue_summary(db, conversation_id, await message_count(db, conversation_id), summarized)
         await db.execute(update(Conversation).where(Conversation.id == conversation_id).values(updated_at=func.now()))
         await db.commit()
     ANSWERS.labels(_outcome(debug["path"], msg.content)).inc()
@@ -262,6 +343,8 @@ async def get_conversation(
     return ConversationDetailOut(
         id=conv.id,
         title=conv.title,
+        model_id=conv.model_id,
+        reasoning_effort=cast(ReasoningEffort | None, conv.reasoning_effort),
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         messages=[MessageOut.model_validate(m) for m in reversed(newest_first[:limit])],

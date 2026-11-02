@@ -4,7 +4,7 @@ Operational procedures for the Moontig RAG stack ([architecture](ARCHITECTURE.md
 
 Alerts in [`ops/prometheus/alerts.yml`](../ops/prometheus/alerts.yml) point here:
 
-The local profile evaluates rules in Prometheus. It does not configure Alertmanager or notification receivers; `severity: page` labels do not send pages until that delivery path is configured and tested.
+The local `observability` profile evaluates rules in Prometheus and routes them through Alertmanager ([`ops/alertmanager/alertmanager.yml`](../ops/alertmanager/alertmanager.yml), `http://127.0.0.1:9093`), which emails `severity: page` and `severity: warn` alerts to separate addresses in Mailpit (`http://localhost:8025`). For production, replace those receivers with your paging and chat integrations and send a test alert (`POST /api/v2/alerts`) to confirm delivery.
 
 | Alert | Runbook |
 | --- | --- |
@@ -106,6 +106,6 @@ Rebuilds the Qdrant index from Postgres chunks (no re-parsing) into a new collec
 
 1. Pick the next version: `curl -s -H "api-key: $QDRANT_API_KEY" http://127.0.0.1:6333/aliases` shows the current target (e.g. `chunks_v1` → use `--version 2`).
 2. For a model or dimension change, set `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL` and `EMBEDDING_DIM` for both `api` and `worker`, and pause query traffic: queries embedded with the new model must not hit the old collection.
-3. Queue it: `podman compose exec api rag reindex --version 2`. The worker locks out ingestion, upload and delete while it runs; follow progress in `podman compose logs -f worker`.
+3. Queue it: `podman compose exec api rag reindex --version 2`. The bulk re-embed runs without blocking ingestion, upload or delete; ingestion is paused only for the final catch-up of documents changed during the run and the alias swap; follow progress in `podman compose logs -f worker`.
 4. When the job is `done`, restart `api` with the new settings and resume traffic. Spot-check a few questions and run the eval suite (recall@8 ≥ 0.85).
 5. Rollback: point the alias back at the previous collection (it is kept) and restore the previous embedding settings. Delete retired collections after the rollback window.

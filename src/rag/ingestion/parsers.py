@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Any
 
 from rag.core.config import get_settings
 from rag.ingestion import sniff
@@ -16,22 +15,27 @@ def _pdf(data: bytes) -> list[Page]:
     import pymupdf
     import pymupdf4llm
 
+    from rag.receipts.ocr import ocr, render_pdf_page
+
+    s = get_settings()
     with pymupdf.open(stream=data, filetype="pdf") as doc:  # type: ignore[no-untyped-call]
         if doc.needs_pass:
             raise ValueError("Encrypted PDFs are not supported")
-        if len(doc) > get_settings().max_pdf_pages:
+        if len(doc) > s.max_pdf_pages:
             raise ValueError("PDF exceeds the allowed page count")
-        if not any(page.get_text().strip() for page in doc):
-            return _scanned_pdf(doc)
+        # OCR is decided per page: a scan with one digital cover sheet still needs OCR on every other page.
+        scanned = {i for i, page in enumerate(doc) if not page.get_text().strip()}
+        if len(scanned) > s.max_ocr_pages:
+            raise ValueError(f"PDF has more than {s.max_ocr_pages} scanned pages")
+        if len(scanned) == len(doc):
+            return [Page(number=i + 1, markdown=ocr(render_pdf_page(doc[i])), ocr=True) for i in range(len(doc))]
         pages = pymupdf4llm.to_markdown(doc, page_chunks=True, show_progress=False)
-    return [Page(number=int(p["metadata"].get("page", i + 1)), markdown=p["text"]) for i, p in enumerate(pages)]
-
-
-def _scanned_pdf(doc: Any) -> list[Page]:
-    from rag.receipts.ocr import ocr, render_pdf_page
-
-    pages = (doc[i] for i in range(min(len(doc), get_settings().max_ocr_pages)))
-    return [Page(number=i + 1, markdown=ocr(render_pdf_page(page)), ocr=True) for i, page in enumerate(pages)]
+        return [
+            Page(number=int(p["metadata"].get("page", i + 1)), markdown=ocr(render_pdf_page(doc[i])), ocr=True)
+            if i in scanned
+            else Page(number=int(p["metadata"].get("page", i + 1)), markdown=p["text"])
+            for i, p in enumerate(pages)
+        ]
 
 
 def _image(data: bytes) -> list[Page]:

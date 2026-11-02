@@ -36,11 +36,11 @@ async def test_receipt_upload_is_extracted_and_tenant_scoped(
 ) -> None:
     seen: dict[str, Any] = {}
 
-    async def fake_extract(image: Any, ocr_text: str, on_attempt: Any) -> Any:
+    async def fake_extract(images: Any, ocr_text: str, on_attempt: Any) -> Any:
         await on_attempt(RouteEntry("ollama", "qwen3-vl:latest", 1))
         async with get_sessionmaker()() as db:  # progress is visible to other sessions while extracting
             seen["progress"] = (await db.execute(select(Document.progress))).scalar_one()
-        seen["ocr"], seen["image"] = ocr_text, image.media_type
+        seen["ocr"], seen["image"] = ocr_text, images[0].media_type
         x = ReceiptExtraction(
             is_receipt=True,
             merchant_name="CORNER CAFE",

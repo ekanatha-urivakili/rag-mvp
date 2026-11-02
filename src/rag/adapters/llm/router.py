@@ -4,6 +4,8 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -13,10 +15,20 @@ import ollama
 import openai
 import yaml
 from opentelemetry.trace import Span, StatusCode
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from rag.adapters.llm.anthropic import AnthropicLLM
-from rag.adapters.llm.base import LLM, Completion, Message, RouteEntry, StreamEvent, StructuredOutputError, Usage
+from rag.adapters.llm.base import (
+    COMPLETE_TEMPERATURE,
+    LLM,
+    STREAM_TEMPERATURE,
+    Completion,
+    Message,
+    RouteEntry,
+    StreamEvent,
+    StructuredOutputError,
+    Usage,
+)
 from rag.adapters.llm.ollama import OllamaLLM
 from rag.adapters.llm.openai import OpenAILLM
 from rag.core.config import Settings, get_settings
@@ -27,7 +39,9 @@ from rag.core.telemetry import tracer
 
 log = logging.getLogger(__name__)
 _ENV = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_STREAM_CEILING_S = 300.0
 OnAttempt = Callable[[RouteEntry], Awaitable[None]]
+_selection: ContextVar[tuple[RouteEntry, LLM] | None] = ContextVar("chat_model_selection", default=None)
 
 
 def _expand(value: Any, settings: Settings) -> Any:
@@ -90,7 +104,7 @@ class FallbackLLM:
         *,
         schema: type[BaseModel] | None = None,
         max_tokens: int,
-        temperature: float = 0.0,
+        temperature: float = COMPLETE_TEMPERATURE,
     ) -> Completion:
         for i, (entry, llm) in enumerate(self._entries):
             if self._on_attempt:
@@ -118,14 +132,16 @@ class FallbackLLM:
             self._fell_back(i, entry, last)
         raise LLMUnavailable(f"All providers failed for route '{self.purpose}'")
 
-    async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, messages: list[Message], *, max_tokens: int, temperature: float = STREAM_TEMPERATURE
+    ) -> AsyncIterator[StreamEvent]:
         for i, (entry, llm) in enumerate(self._entries):
             if self._on_attempt:
                 await self._on_attempt(entry)
             # Not a current-context span: it stays open across yields of this generator.
             span = tracer.start_span("llm.stream", attributes=self._attrs(entry, i))
             t0 = time.perf_counter()
-            it = llm.stream(messages, max_tokens=max_tokens).__aiter__()
+            it = llm.stream(messages, max_tokens=max_tokens, temperature=temperature).__aiter__()
             usage = None
             try:
                 try:
@@ -139,11 +155,19 @@ class FallbackLLM:
                 usage = first.usage
                 first.provider, first.model, first.fallback_used = llm.provider, llm.model, i > 0
                 yield first
-                async with asyncio.timeout(entry.timeout_s):
-                    async for ev in it:
-                        ev.provider, ev.model, ev.fallback_used = llm.provider, llm.model, i > 0
-                        usage = ev.usage or usage
-                        yield ev
+                # After the first event, `timeout_s` bounds the gap between events (a long answer that keeps
+                # streaming is not cut off), and _STREAM_CEILING_S bounds the whole stream. No yield sits inside a
+                # timeout scope, so expiry never cancels the consumer.
+                deadline = time.monotonic() + max(entry.timeout_s, _STREAM_CEILING_S)
+                while True:
+                    try:
+                        async with asyncio.timeout(min(entry.timeout_s, deadline - time.monotonic())):
+                            ev = await it.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    ev.provider, ev.model, ev.fallback_used = llm.provider, llm.model, i > 0
+                    usage = ev.usage or usage
+                    yield ev
             except BaseException as e:
                 cancelled = isinstance(e, GeneratorExit | asyncio.CancelledError)
                 self._observe(entry, "cancelled" if cancelled else "error", t0, span, usage)
@@ -216,7 +240,37 @@ class ModelRouter:
     def has_provider(self, purpose: str) -> bool:
         return any(self._available(e.provider) for e in self._routes.get(purpose, []))
 
+    def chat_entries(self) -> list[RouteEntry]:
+        entries: dict[str, RouteEntry] = {}
+        for entry in self._routes["generation"]:
+            if self._available(entry.provider):
+                entries.setdefault(entry.provider, entry)
+        return sorted(entries.values(), key=lambda entry: entry.provider != "openai")
+
+    @asynccontextmanager
+    async def select_chat(self, entry: RouteEntry, api_key: SecretStr | None = None) -> AsyncIterator[None]:
+        client = (
+            self._client(entry.provider)
+            if api_key is None
+            else (
+                openai.AsyncOpenAI(api_key=api_key.get_secret_value(), max_retries=1)
+                if entry.provider == "openai"
+                else anthropic.AsyncAnthropic(api_key=api_key.get_secret_value(), max_retries=1)
+            )
+        )
+        cls = {"ollama": OllamaLLM, "anthropic": AnthropicLLM, "openai": OpenAILLM}[entry.provider]
+        token = _selection.set((entry, cls(client, entry.model, entry.options)))
+        try:
+            yield
+        finally:
+            _selection.reset(token)
+            if api_key is not None:
+                await client.close()
+
     def for_purpose(self, purpose: str, on_attempt: OnAttempt | None = None) -> FallbackLLM:
+        selected = _selection.get()
+        if selected is not None and purpose in {"orchestration", "generation"}:
+            return FallbackLLM(purpose, [selected], on_attempt)
         entries: list[tuple[RouteEntry, LLM]] = []
         only = os.environ.get("RAG_PIN_PROVIDER")  # eval runs compare providers one at a time
         for e in self._routes[purpose]:

@@ -98,7 +98,16 @@ async def refresh(db: AsyncSession, raw: str) -> TokenPair:
     ).scalar_one_or_none()
     if rt is None:
         raise Unauthorized("Invalid refresh token")
-    if rt.revoked_at is not None:
+    if rt.revoked_at is not None and not await _concurrent_rotation(db, rt):
+        grace = get_settings().refresh_reuse_grace_s
+        if grace > 0 and (_now() - rt.revoked_at).total_seconds() <= grace and rt.replaced_by is not None:
+            replacement = await db.get(RefreshToken, rt.replaced_by)
+            if replacement is not None and replacement.revoked_at is None and replacement.expires_at > _now():
+                pair, new_rt = await _issue_tokens(db, rt.user_id, rt.tenant_id, rt.family_id)
+                replacement.revoked_at = _now()
+                replacement.replaced_by = new_rt.id
+                await db.commit()
+                return pair
         # A rotated token was replayed: assume theft and kill the whole family.
         await _revoke_family(db, rt.family_id)
         audit(db, action="auth.refresh_reuse_detected", tenant_id=rt.tenant_id, actor_user_id=rt.user_id)
@@ -120,10 +129,26 @@ async def refresh(db: AsyncSession, raw: str) -> TokenPair:
         raise Unauthorized("Invalid refresh token")
 
     pair, new_rt = await _issue_tokens(db, rt.user_id, rt.tenant_id, rt.family_id)
-    rt.revoked_at = _now()
-    rt.replaced_by = new_rt.id
+    if rt.revoked_at is None:
+        rt.revoked_at = _now()
+        rt.replaced_by = new_rt.id
     await db.commit()
     return pair
+
+
+async def _concurrent_rotation(db: AsyncSession, rt: RefreshToken) -> bool:
+    """A just-rotated token presented again within `refresh_reuse_grace_s` while its successor is still live.
+
+    Parallel requests through different BFF replicas refresh the same token; the browser keeps whichever cookie
+    lands last, so the successor is left valid rather than revoked. Logout and family revocation still win.
+    """
+    grace = get_settings().refresh_reuse_grace_s
+    if grace <= 0 or rt.revoked_at is None or rt.replaced_by is None:
+        return False
+    if (_now() - rt.revoked_at).total_seconds() > grace:
+        return False
+    successor = await db.get(RefreshToken, rt.replaced_by)
+    return successor is not None and successor.revoked_at is None and successor.expires_at > _now()
 
 
 async def _revoke_family(db: AsyncSession, family_id: uuid.UUID) -> None:
@@ -209,7 +234,10 @@ async def verify_signup(
     s = get_settings()
     if not s.signup_enabled:
         raise Forbidden("Signup is disabled. Ask your workspace admin for an invitation.")
-    await ratelimit.hit(db, f"signup-verify:ip:{ip}", 20, s.rl_signup_window_s)
+    await ratelimit.hit(db, f"signup-verify:ip:{ip}", s.rl_signup_verify_per_ip, s.rl_signup_window_s)
+    await ratelimit.hit(
+        db, f"signup-verify:token:{hash_token(token)}", s.rl_signup_verify_per_token, s.rl_signup_window_s
+    )
     tok = await _consume_email_token(db, token, "signup")
     validate_password_policy(password, tok.email)
     name = workspace_name.strip()
@@ -277,7 +305,9 @@ async def _consume_email_token(db: AsyncSession, raw: str, token_type: str) -> E
 
 
 async def reset_password(db: AsyncSession, *, token: str, new_password: str, ip: str | None) -> None:
-    await ratelimit.hit(db, f"reset:ip:{ip}", 20, 3600)
+    s = get_settings()
+    await ratelimit.hit(db, f"reset:ip:{ip}", s.rl_reset_per_ip, s.rl_reset_window_s)
+    await ratelimit.hit(db, f"reset:token:{hash_token(token)}", s.rl_reset_per_token, s.rl_reset_window_s)
     email = (
         await db.execute(
             select(EmailToken.email).where(

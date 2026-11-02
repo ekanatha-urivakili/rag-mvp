@@ -17,6 +17,9 @@ const schema = z
   })
   .refine((e) => e.ENV !== "prod" || e.APP_ORIGIN.startsWith("https://"), {
     message: "APP_ORIGIN must be https in prod",
+  })
+  .refine((e) => e.ENV !== "prod" || e.TRUSTED_PROXY_HOPS >= 1, {
+    message: "TRUSTED_PROXY_HOPS must be at least 1 in prod so per-IP rate limits see real client IPs",
   });
 
 export type Env = z.infer<typeof schema> & { secureCookies: boolean; appOrigin: string };

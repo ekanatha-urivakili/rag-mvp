@@ -74,21 +74,6 @@ services:
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
 
-  # Optional legacy UI; all workspace features are available in Next.js.
-  ui:
-    <<: *app
-    profiles: [legacy]
-    env_file: []
-    volumes: []
-    command: >
-      streamlit run ui/app.py --server.port 8501 --server.address 0.0.0.0
-      --server.enableXsrfProtection true --browser.gatherUsageStats false
-    environment:
-      API_URL: http://api:8000
-    ports: ["127.0.0.1:8501:8501"]
-    depends_on:
-      api: { condition: service_healthy }
-
   postgres:
     image: docker.io/library/postgres:16
     environment:
@@ -151,6 +136,18 @@ services:
     ports: ["127.0.0.1:9090:9090"]
     depends_on:
       api: { condition: service_healthy }
+      alertmanager: { condition: service_started }
+    restart: unless-stopped
+
+  alertmanager:
+    image: docker.io/prom/alertmanager:latest
+    profiles: [observability]
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./ops/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager:/alertmanager
+    ports: ["127.0.0.1:9093:9093"]
+    depends_on: [mailpit]
     restart: unless-stopped
 
   grafana:
@@ -188,4 +185,5 @@ volumes:
   models:
   mailpit:
   prometheus:
+  alertmanager:
   grafana:

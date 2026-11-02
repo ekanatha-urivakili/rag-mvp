@@ -21,18 +21,21 @@ class Settings(BaseSettings):
     jwt_audience: str = "rag-clients"
     access_token_ttl_s: int = 15 * 60
     refresh_token_ttl_s: int = 14 * 24 * 3600
+    refresh_reuse_grace_s: float = Field(default=0.0, ge=0)
     invite_ttl_s: int = 72 * 3600
     password_reset_ttl_s: int = 30 * 60
     signup_ttl_s: int = Field(default=30 * 60, gt=0)
     signup_enabled: bool = True
     rl_signup_per_ip: int = Field(default=5, gt=0)
+    rl_signup_verify_per_ip: int = Field(default=20, gt=0)
+    rl_signup_verify_per_token: int = Field(default=5, gt=0)
     rl_signup_window_s: int = Field(default=3600, gt=0)
     password_min_length: int = 12
     password_max_length: int = 128
     refresh_cookie_name: str = "rag_refresh"
 
     # --- HTTP hardening ---
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:8501"])
+    cors_origins: list[str] = Field(default_factory=list)
     allowed_hosts: list[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1", "api"])
     public_ui_url: str = "http://localhost:3000"
     max_request_body_bytes: int = 30 * 1024 * 1024
@@ -43,6 +46,9 @@ class Settings(BaseSettings):
     rl_login_window_s: int = 900
     rl_forgot_per_ip: int = 5
     rl_forgot_window_s: int = 3600
+    rl_reset_per_ip: int = Field(default=20, gt=0)
+    rl_reset_per_token: int = Field(default=5, gt=0)
+    rl_reset_window_s: int = Field(default=3600, gt=0)
     rl_refresh_per_ip: int = Field(default=120, gt=0)
     rl_refresh_window_s: int = Field(default=60, gt=0)
     rl_chat_per_tenant: int = 120
@@ -58,6 +64,7 @@ class Settings(BaseSettings):
     max_docx_uncompressed_bytes: int = 200 * 1024 * 1024
     max_image_pixels: int = 40_000_000  # decompression-bomb guard for uploaded images
     max_ocr_pages: int = 20
+    max_receipt_image_pages: int = Field(default=4, gt=0)
     max_pdf_pages: int = Field(default=200, gt=0)
 
     # --- Storage ---
@@ -92,6 +99,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
+    model_keys_encryption_key: SecretStr | None = Field(default=None, min_length=32)
     openai_generation_model: str = "gpt-5-mini"
     openai_judge_model: str = "gpt-5-mini"
     ollama_vision_model: str = "qwen3-vl:latest"
@@ -111,6 +119,7 @@ class Settings(BaseSettings):
 
     # --- Worker ---
     worker_poll_interval_s: float = 1.0
+    worker_metrics_port: int = 8001
     job_max_attempts: int = 3
 
     # --- Observability ---
