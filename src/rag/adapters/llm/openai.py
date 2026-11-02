@@ -44,6 +44,14 @@ class OpenAILLM:
         # Reasoning models (gpt-5, o-series) reject any temperature other than the default.
         return {"temperature": temperature} if self._sampling else {}
 
+    def _reasoning_kwargs(self, max_tokens: int) -> dict[str, Any]:
+        effort = self._options.get("reasoning_effort")
+        if effort is None:
+            return {"max_completion_tokens": max_tokens}
+        # The provider's completion limit includes hidden reasoning as well as visible output.
+        budget = 8192 if effort in {"high", "xhigh", "max"} else 4096
+        return {"reasoning_effort": effort, "max_completion_tokens": max(max_tokens, budget)}
+
     async def complete(
         self,
         messages: list[Message],
@@ -55,7 +63,7 @@ class OpenAILLM:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self._msgs(messages),
-            "max_completion_tokens": max_tokens,
+            **self._reasoning_kwargs(max_tokens),
             **self._sampling_kwargs(temperature),
         }
         if schema is not None:
@@ -82,7 +90,7 @@ class OpenAILLM:
         resp = await self._client.chat.completions.create(
             model=self.model,
             messages=self._msgs(messages),
-            max_completion_tokens=max_tokens,
+            **self._reasoning_kwargs(max_tokens),
             stream=True,
             stream_options={"include_usage": True},
             **self._sampling_kwargs(temperature),

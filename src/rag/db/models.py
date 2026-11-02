@@ -272,6 +272,7 @@ class Conversation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200))
     model_id: Mapped[str | None] = mapped_column(String(80))
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = _created()
     # Last message activity; history is ordered and paginated by it.
     updated_at: Mapped[datetime] = _created()

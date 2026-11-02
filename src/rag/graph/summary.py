@@ -6,13 +6,13 @@ Runs as the `summarize_conversation` worker job after an answer is saved, so it 
 import logging
 import uuid
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag.adapters.llm.base import Message
-from rag.adapters.llm.connections import resolve_chat_model
+from rag.adapters.llm.base import Message, ReasoningEffort
+from rag.adapters.llm.connections import apply_effort, resolve_chat_model
 from rag.adapters.llm.router import get_router
 from rag.auth.rbac import Role
 from rag.core.config import get_settings
@@ -71,6 +71,8 @@ async def summarize_conversation(db: AsyncSession, payload: dict[str, Any]) -> N
         else None
     )
     done, previous = conv.summarized_count, conv.summary
+    if selection:
+        selection = apply_effort(selection, cast(ReasoningEffort | None, conv.reasoning_effort))
     target = await message_count(db, conversation_id) - get_settings().history_turns
     if target <= done:
         return

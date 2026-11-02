@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, ValidationInfo, field_validator, model_validator
 
+from rag.adapters.llm.base import ReasoningEffort
 from rag.auth.rbac import Role
 from rag.core.errors import DOCUMENT_PROCESSING_FAILURE
 from rag.domain.models import Citation
@@ -249,6 +250,7 @@ class ChatModelOut(Out):
     provider: str
     model: str
     source: Literal["server", "personal"]
+    reasoning_efforts: list[ReasoningEffort] = Field(default_factory=list)
 
 
 class ChatModelsOut(Out):
@@ -266,12 +268,14 @@ class ChatIn(In):
     message: str = Field(min_length=1, max_length=4000)
     filters: ChatFilters | None = None
     model_id: str | None = Field(default=None, min_length=1, max_length=80)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ConversationOut(Out):
     id: uuid.UUID
     title: str
     model_id: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
     created_at: datetime
     updated_at: datetime
 

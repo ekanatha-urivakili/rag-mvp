@@ -8,6 +8,18 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel
 
+type ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+def reasoning_efforts(provider: str, model: str) -> list[ReasoningEffort]:
+    if provider != "openai":
+        return []
+    if re.match(r"^gpt-6(?:\.\d+)?-(sol|luna|terra|astra)(?:$|-)", model):
+        return ["low", "medium", "high", "xhigh", "max"]
+    if "pro" not in model and re.match(r"^(gpt-5(?:[.-]|$)|o[134](?:-|$))", model):
+        return ["low", "medium", "high"]
+    return []
+
 
 @dataclass(frozen=True)
 class Image:

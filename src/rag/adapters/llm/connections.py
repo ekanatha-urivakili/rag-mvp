@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import secrets
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -11,7 +11,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag.adapters.llm.base import RouteEntry
+from rag.adapters.llm.base import ReasoningEffort, RouteEntry, reasoning_efforts
 from rag.adapters.llm.router import get_router
 from rag.api.schemas import ChatModelOut
 from rag.core.config import get_settings
@@ -25,6 +25,24 @@ class ChatSelection:
     id: str
     entry: RouteEntry
     api_key: SecretStr | None = None
+
+
+def apply_effort(selection: ChatSelection, effort: ReasoningEffort | None) -> ChatSelection:
+    choices = reasoning_efforts(selection.entry.provider, selection.entry.model)
+    if effort is not None and effort not in choices:
+        raise AppError("This reasoning effort is not supported by the selected model")
+    if effort is None:
+        return selection
+    return replace(
+        selection,
+        entry=replace(
+            selection.entry,
+            options={
+                **selection.entry.options,
+                "reasoning_effort": effort,
+            },
+        ),
+    )
 
 
 def _cipher() -> AESGCM:
@@ -60,7 +78,13 @@ def decrypt_key(row: ModelConnection) -> SecretStr | None:
 
 def server_models() -> list[ChatModelOut]:
     return [
-        ChatModelOut(id=f"server-{entry.provider}", provider=entry.provider, model=entry.model, source="server")
+        ChatModelOut(
+            id=f"server-{entry.provider}",
+            provider=entry.provider,
+            model=entry.model,
+            source="server",
+            reasoning_efforts=reasoning_efforts(entry.provider, entry.model),
+        )
         for entry in get_router().chat_entries()
     ]
 
@@ -78,7 +102,13 @@ async def personal_models(db: AsyncSession, ctx: RequestContext) -> list[ModelCo
 
 
 def connection_out(row: ModelConnection) -> ChatModelOut:
-    return ChatModelOut(id=str(row.id), provider=row.provider, model=row.model, source="personal")
+    return ChatModelOut(
+        id=str(row.id),
+        provider=row.provider,
+        model=row.model,
+        source="personal",
+        reasoning_efforts=reasoning_efforts(row.provider, row.model),
+    )
 
 
 async def resolve_chat_model(db: AsyncSession, ctx: RequestContext, model_id: str | None) -> ChatSelection:

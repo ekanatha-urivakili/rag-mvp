@@ -33,7 +33,7 @@ async def test_personal_keys_are_write_only_encrypted_and_owner_scoped(
     )
     assert added.status_code == 201, added.text
     connection_id = added.json()["id"]
-    assert set(added.json()) == {"id", "provider", "model", "source"}
+    assert set(added.json()) == {"id", "provider", "model", "source", "reasoning_efforts"}
     listed = await client.get("/v1/chat-models", headers=tenant.headers)
     assert connection_id in {item["id"] for item in listed.json()["items"]}
     assert secret not in listed.text
@@ -128,5 +128,80 @@ async def test_unknown_model_is_rejected_before_saving_chat(client: httpx.AsyncC
         "/v1/chat", headers=tenant.headers, json={"message": "test", "model_id": str(uuid.uuid4())}
     )
     assert response.status_code == 404
+    async with get_sessionmaker()() as db:
+        assert await db.scalar(select(func.count()).select_from(Conversation)) == 0
+
+
+async def test_effort_is_applied_remembered_and_cleared_when_switching_models(
+    client: httpx.AsyncClient,
+    tenant: Account,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    added = await client.post(
+        "/v1/model-connections",
+        headers=tenant.headers,
+        json={
+            "provider": "openai",
+            "model": "gpt-6-luna",
+            "api_key": "test-personal-key",
+        },
+    )
+    assert added.status_code == 201
+    assert added.json()["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    seen: list[str | None] = []
+
+    async def run(*args: object) -> AsyncIterator[str]:
+        for purpose in ("orchestration", "generation"):
+            seen.append(get_router().for_purpose(purpose)._entries[0][0].options.get("reasoning_effort"))
+        yield 'event: token\ndata: {"text":"OK"}\n\n'
+
+    monkeypatch.setattr(chat, "_run", run)
+    first = await client.post(
+        "/v1/chat",
+        headers=tenant.headers,
+        json={
+            "message": "test",
+            "model_id": added.json()["id"],
+            "reasoning_effort": "high",
+        },
+    )
+    assert first.status_code == 200
+    async with get_sessionmaker()() as db:
+        conv = await db.scalar(select(Conversation).where(Conversation.user_id == tenant.user_id))
+        assert conv is not None and conv.reasoning_effort == "high"
+        conversation_id = str(conv.id)
+    detail = await client.get(f"/v1/conversations/{conversation_id}", headers=tenant.headers)
+    assert detail.json()["reasoning_effort"] == "high"
+    again = await client.post(
+        "/v1/chat", headers=tenant.headers, json={"message": "again", "conversation_id": conversation_id}
+    )
+    assert again.status_code == 200
+    changed = await client.post(
+        "/v1/chat",
+        headers=tenant.headers,
+        json={
+            "message": "local",
+            "conversation_id": conversation_id,
+            "model_id": "server-ollama",
+        },
+    )
+    assert changed.status_code == 200
+    assert seen == ["high", "high", "high", "high", None, None]
+    async with get_sessionmaker()() as db:
+        conv = await db.get(Conversation, uuid.UUID(conversation_id))
+        assert conv is not None and conv.reasoning_effort is None
+
+
+async def test_unsupported_effort_is_rejected_before_saving_chat(client: httpx.AsyncClient, tenant: Account) -> None:
+    result = await client.post(
+        "/v1/chat",
+        headers=tenant.headers,
+        json={
+            "message": "test",
+            "model_id": "server-ollama",
+            "reasoning_effort": "high",
+        },
+    )
+    assert result.status_code == 400
     async with get_sessionmaker()() as db:
         assert await db.scalar(select(func.count()).select_from(Conversation)) == 0

@@ -1,6 +1,8 @@
 # Chat model selection
 
-The chat header lists configured server models and the signed-in user's personal connections in the current workspace. OpenAI is the default when `OPENAI_API_KEY` is configured. Selecting a model applies to query analysis, query rewriting, direct replies, answers, and conversation summaries. Selection does not fall back to another provider. Embeddings, receipt extraction, and optional evaluation keep their deployment routes.
+The composer has a compact model-and-effort pill. Its popover opens the effort slider; the model name opens the model list, with **Manage models & keys** at the bottom. That list includes configured server models and the signed-in user's personal connections in the current workspace. OpenAI is the default when `OPENAI_API_KEY` is configured. Selecting a model applies to query analysis, query rewriting, direct replies, answers, and conversation summaries. Selection does not fall back to another provider. Embeddings, receipt extraction, and optional evaluation keep their deployment routes.
+
+Supported OpenAI reasoning models expose effort choices in `GET /v1/chat-models`; GPT-6 Luna supports Low, Medium, High, Extra high, and Max. Other supported reasoning families expose Low, Medium, and High. Unknown models and other providers do not expose this control, and the API rejects unsupported model/effort combinations before saving a question. `POST /v1/chat` accepts `reasoning_effort`; each conversation remembers it alongside the model. OpenAI structured and streaming requests both receive it. Completion limits include hidden reasoning, so explicit Low/Medium reserves at least 4,096 tokens and High/Extra high/Max at least 8,192, still bounded per request. Higher effort can increase latency and cost. See the [OpenAI GPT-6 Luna reference](https://developers.openai.com/api/docs/models/gpt-6-luna).
 
 ```mermaid
 flowchart LR

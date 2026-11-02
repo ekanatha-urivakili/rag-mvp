@@ -2,16 +2,15 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
-import { BrandMark } from "@/components/brand";
 import { useMe } from "@/components/app-shell";
 import { ChatModelPicker } from "@/components/chat-model-picker";
 import { Markdown } from "@/components/markdown";
 import { Alert, Button } from "@/components/ui";
 import { ApiError, getJson, request, sendJson } from "@/lib/client";
 import { parseSse } from "@/lib/sse";
-import type { ChatModels, Citation, ConversationDetail, Message } from "@/lib/types";
+import type { ChatModels, Citation, ConversationDetail, Message, ReasoningEffort } from "@/lib/types";
 
 const MAX_CHARS = 4000;
 const OLDER_PAGE = 50;
@@ -65,6 +64,13 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
   const [selectedModel, setSelectedModel] = useState<string | null>(initial?.model_id ?? null);
   const preferredModel = selectedModel ?? models.data?.default_id ?? "";
   const modelId = models.data?.items.some((model) => model.id === preferredModel) ? preferredModel : "";
+  const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort>(initial?.reasoning_effort ?? "medium");
+  const effortChoices = models.data?.items.find((model) => model.id === modelId)?.reasoning_efforts ?? [];
+  const effort = effortChoices.includes(selectedEffort)
+    ? selectedEffort
+    : effortChoices.includes("medium")
+      ? "medium"
+      : (effortChoices[0] ?? null);
   const [messages, setMessages] = useState<UiMessage[]>(initial?.messages ?? []);
   const [hasMore, setHasMore] = useState(initial?.has_more ?? false);
   const [olderError, setOlderError] = useState<string | null>(null);
@@ -135,7 +141,12 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
       const r = await request("/api/v1/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, conversation_id: conversationId, model_id: modelId }),
+        body: JSON.stringify({
+          message: text,
+          conversation_id: conversationId,
+          model_id: modelId,
+          reasoning_effort: effort,
+        }),
         signal: ctrl.signal,
       });
       if (!r.body) throw new ApiError(502, "Empty response");
@@ -197,6 +208,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
         id: done.conversation_id,
         title: text.slice(0, 80),
         model_id: modelId,
+        reasoning_effort: effort,
         created_at: now,
         updated_at: new Date().toISOString(),
         messages: [...before, userMsg, { ...reply }],
@@ -207,16 +219,30 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
     }
   }
 
+  const composer = (
+    <Composer
+      disabled={streaming}
+      canSend={!!modelId}
+      onSend={(text) => void send(text)}
+      onStop={() => abortRef.current?.abort()}
+      placeholder={conversationId ? "Message Moontig…" : "Ask Moontig"}
+      picker={
+        <ChatModelPicker
+          catalog={models.data}
+          value={modelId}
+          onChange={setSelectedModel}
+          disabled={streaming}
+          loading={models.isPending}
+          failed={models.isError}
+          effort={effort}
+          onEffortChange={setSelectedEffort}
+        />
+      }
+    />
+  );
+
   return (
     <div className="flex h-full flex-col">
-      <ChatModelPicker
-        catalog={models.data}
-        value={modelId}
-        onChange={setSelectedModel}
-        disabled={streaming}
-        loading={models.isPending}
-        failed={models.isError}
-      />
       <div
         ref={scrollRef}
         onScroll={(e) => {
@@ -226,7 +252,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
         className="min-h-0 flex-1 overflow-y-auto"
       >
         <div
-          className={`mx-auto max-w-3xl space-y-6 px-4 py-6 ${messages.length === 0 ? "flex min-h-full items-center justify-center" : ""}`}
+          className={`mx-auto space-y-6 py-6 ${messages.length === 0 ? "flex min-h-full max-w-4xl flex-col justify-center pb-24" : "max-w-3xl px-4"}`}
         >
           {hasMore && (
             <div className="text-center">
@@ -237,6 +263,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
             </div>
           )}
           {messages.length === 0 && <EmptyState />}
+          {messages.length === 0 && composer}
           {messages.map((m) =>
             m.role === "user" ? (
               <div key={m.id} className="flex justify-end">
@@ -250,77 +277,15 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
           )}
         </div>
       </div>
-      <Composer
-        disabled={streaming}
-        canSend={!!modelId}
-        onSend={(t) => void send(t)}
-        onStop={() => abortRef.current?.abort()}
-        placeholder={conversationId ? "Continue this conversation…" : "Ask about your documents…"}
-      />
+      {messages.length > 0 && composer}
     </div>
   );
 }
 
 function EmptyState() {
   return (
-    <div className="home-welcome w-full pb-4 text-center">
-      <div className="home-brand">
-        <BrandMark className="size-16 sm:size-20" />
-      </div>
-      <p className="brand-eyebrow mt-6">YOUR PERSONAL KNOWLEDGE SPACE</p>
-      <h1 className="mt-3 text-3xl font-semibold tracking-[-0.045em] sm:text-5xl">
-        A little curiosity.
-        <br />
-        <span className="text-violet-600 dark:text-violet-400">A clearer answer.</span>
-      </h1>
-      <p className="mx-auto mt-4 max-w-md text-sm leading-6 text-zinc-500">
-        Ask a question. Connect the dots. Find answers in your documents, with sources you can follow.
-      </p>
-      <div className="mx-auto mt-8 grid max-w-xl gap-3 text-left sm:grid-cols-2">
-        <Link href="/documents" className="home-action group">
-          <span className="home-action-icon" aria-hidden="true">
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6" />
-            </svg>
-          </span>
-          <span className="mt-4 flex items-center justify-between font-semibold">
-            Explore your documents <span aria-hidden="true">→</span>
-          </span>
-          <span className="mt-1 block text-xs leading-5 text-zinc-500">
-            Upload files. Bring your knowledge together.
-          </span>
-        </Link>
-        <Link href="/receipts" className="home-action group">
-          <span className="home-action-icon receipt-icon" aria-hidden="true">
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6m-6 4h6m-6 4h3" />
-            </svg>
-          </span>
-          <span className="mt-4 flex items-center justify-between font-semibold">
-            Organise your receipts <span aria-hidden="true">→</span>
-          </span>
-          <span className="mt-1 block text-xs leading-5 text-zinc-500">Scan purchases. Keep the details in reach.</span>
-        </Link>
-      </div>
-      <p className="mt-6 text-xs text-zinc-500">Start a question below, or pick up a conversation in your history.</p>
+    <div className="px-6 pb-3 text-center">
+      <h1 className="text-2xl font-normal tracking-tight sm:text-3xl">What’s on your mind today?</h1>
     </div>
   );
 }
@@ -431,12 +396,14 @@ function Composer({
   onSend,
   onStop,
   placeholder,
+  picker,
 }: {
   disabled: boolean;
   canSend: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
   placeholder: string;
+  picker: ReactNode;
 }) {
   const [text, setText] = useState("");
   const trimmed = text.trim();
@@ -456,38 +423,103 @@ function Composer({
 
   return (
     <div className="shrink-0 px-4 pt-3 pb-1">
-      <form
-        className="home-composer mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit();
-        }}
-      >
-        <label className="sr-only" htmlFor="composer">
-          Message
-        </label>
-        <textarea
-          id="composer"
-          autoFocus
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          rows={Math.min(8, Math.max(1, text.split("\n").length))}
-          maxLength={MAX_CHARS}
-          placeholder={placeholder}
-          className="min-h-11 min-w-0 flex-1 resize-none bg-transparent px-2 py-2.5 outline-none"
-        />
+      <div className="home-composer mx-auto grid max-w-4xl grid-cols-[32px_minmax(0,1fr)_40px] items-center gap-x-2 gap-y-2 rounded-[30px] border border-zinc-200 bg-white p-2.5 shadow-[0_2px_16px_rgba(0,0,0,0.04)] sm:flex dark:border-zinc-700 dark:bg-zinc-900">
+        <details className="relative col-start-1 row-start-1 shrink-0">
+          <summary
+            aria-label="Add files"
+            title="Add files"
+            className="flex size-8 cursor-pointer list-none items-center justify-center rounded-full text-zinc-800 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-blue-500 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              aria-hidden="true"
+            >
+              <path d="M12 4v16M4 12h16" />
+            </svg>
+          </summary>
+          <div className="absolute bottom-full left-0 z-30 mb-3 w-56 rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+            <Link
+              href="/documents"
+              className="block rounded-xl px-3 py-2.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              Upload documents
+            </Link>
+            <Link
+              href="/receipts"
+              className="block rounded-xl px-3 py-2.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              Scan receipts
+            </Link>
+          </div>
+        </details>
+        <form
+          id="chat-message-form"
+          className="col-start-2 row-start-1 min-w-0 flex-1"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <label className="sr-only" htmlFor="composer">
+            Message
+          </label>
+          <textarea
+            id="composer"
+            autoFocus
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKeyDown}
+            rows={Math.min(8, Math.max(1, text.split("\n").length))}
+            maxLength={MAX_CHARS}
+            placeholder={placeholder}
+            className="chat-composer-input block min-h-10 w-full min-w-0 resize-none bg-transparent px-1 py-2 text-base outline-none placeholder:text-zinc-400"
+          />
+        </form>
+        <div className="col-span-3 row-start-2 justify-self-end sm:shrink-0">{picker}</div>
         {disabled ? (
-          <Button type="button" variant="secondary" onClick={onStop} className="h-11 rounded-full">
-            Stop
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={onStop}
+            aria-label="Stop response"
+            title="Stop response"
+            className="col-start-3 row-start-1 size-10 shrink-0 rounded-full p-0"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="5" y="5" width="14" height="14" rx="2" />
+            </svg>
           </Button>
         ) : (
-          <Button type="submit" disabled={!trimmed || !canSend} className="h-11 rounded-full">
-            Send
+          <Button
+            type="submit"
+            form="chat-message-form"
+            disabled={!trimmed || !canSend}
+            aria-label="Send"
+            title="Send"
+            className="col-start-3 row-start-1 size-10 shrink-0 rounded-full p-0"
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 19V5m-6 6 6-6 6 6" />
+            </svg>
           </Button>
         )}
-      </form>
-      <p className="mx-auto mt-1 max-w-3xl text-right text-xs text-zinc-500">
+      </div>
+      <p className="mx-auto mt-2 max-w-4xl pr-3 text-right text-[11px] text-zinc-400">
         {text.length > MAX_CHARS - 500 ? `${text.length}/${MAX_CHARS}` : "Enter to send · Shift+Enter for a new line"}
       </p>
     </div>

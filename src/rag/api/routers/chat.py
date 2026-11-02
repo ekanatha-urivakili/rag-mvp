@@ -5,7 +5,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import anyio
 from fastapi import APIRouter, Depends, Query, status
@@ -14,7 +14,8 @@ from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag.adapters.llm.connections import ChatSelection, resolve_chat_model
+from rag.adapters.llm.base import ReasoningEffort
+from rag.adapters.llm.connections import ChatSelection, apply_effort, resolve_chat_model
 from rag.adapters.llm.router import get_router
 from rag.api.schemas import (
     ChatIn,
@@ -76,16 +77,23 @@ async def chat(body: ChatIn, ctx: ChatUser, db: DB) -> StreamingResponse:
         # Continuing an existing chat: it moves to the top of the history list.
         conv = await _own_conversation(db, ctx, body.conversation_id)
         selection = await resolve_chat_model(db, ctx, body.model_id or conv.model_id)
+        effort = body.reasoning_effort
+        if effort is None and selection.id == conv.model_id:
+            effort = cast(ReasoningEffort | None, conv.reasoning_effort)
+        selection = apply_effort(selection, effort)
         conv.model_id = selection.id
+        conv.reasoning_effort = effort
         await db.execute(update(Conversation).where(Conversation.id == conv.id).values(updated_at=func.now()))
     else:
         selection = await resolve_chat_model(db, ctx, body.model_id)
+        selection = apply_effort(selection, body.reasoning_effort)
         conv = Conversation(
             id=uuid.uuid4(),
             tenant_id=ctx.tenant_id,
             user_id=ctx.user_id,
             title=body.message[:80].replace("\n", " "),
             model_id=selection.id,
+            reasoning_effort=body.reasoning_effort,
         )
         db.add(conv)
         await db.flush()
@@ -336,6 +344,7 @@ async def get_conversation(
         id=conv.id,
         title=conv.title,
         model_id=conv.model_id,
+        reasoning_effort=cast(ReasoningEffort | None, conv.reasoning_effort),
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         messages=[MessageOut.model_validate(m) for m in reversed(newest_first[:limit])],

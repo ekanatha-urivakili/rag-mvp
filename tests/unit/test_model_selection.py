@@ -1,11 +1,14 @@
 import asyncio
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from rag.adapters.llm.base import RouteEntry
-from rag.adapters.llm.connections import decrypt_key, encrypt_key
+from rag.adapters.llm.base import Message, RouteEntry, reasoning_efforts
+from rag.adapters.llm.connections import ChatSelection, apply_effort, decrypt_key, encrypt_key
+from rag.adapters.llm.openai import OpenAILLM
 from rag.adapters.llm.router import ModelRouter
 from rag.api.schemas import ModelConnectionIn
 from rag.core.config import Settings, get_settings
@@ -82,3 +85,38 @@ async def test_selection_is_reset_when_request_fails() -> None:
         async with router.select_chat(RouteEntry("ollama", "temporary-model", 10)):
             raise RuntimeError("cancelled request")
     assert router.for_purpose("generation").model == before
+
+
+def test_effort_capabilities_and_validation() -> None:
+    assert reasoning_efforts("openai", "gpt-6-luna") == ["low", "medium", "high", "xhigh", "max"]
+    assert reasoning_efforts("openai", "gpt-5-mini") == ["low", "medium", "high"]
+    for provider, model in [("ollama", "qwen3.5:4b"), ("anthropic", "claude-sonnet-5-5"), ("openai", "custom-model")]:
+        assert reasoning_efforts(provider, model) == []
+        with pytest.raises(AppError, match="not supported"):
+            apply_effort(ChatSelection("test", RouteEntry(provider, model, 10)), "high")
+    selection = ChatSelection("test", RouteEntry("openai", "gpt-6-luna", 10))
+    assert apply_effort(selection, "high").entry.options["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in selection.entry.options
+
+
+async def test_openai_receives_effort_for_complete_and_stream_with_reasoning_budget() -> None:
+    client = Mock()
+    create = AsyncMock(
+        return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))], usage=None)
+    )
+    client.chat.completions.create = create
+    llm = OpenAILLM(client, "gpt-6-luna", {"reasoning_effort": "high"})
+    await llm.complete([Message("user", "hello")], max_tokens=300)
+    assert create.call_args.kwargs["reasoning_effort"] == "high"
+    assert create.call_args.kwargs["max_completion_tokens"] == 8192
+    assert "temperature" not in create.call_args.kwargs
+
+    async def chunks():
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="OK"))], usage=None)
+
+    create.return_value = chunks()
+    events = [event.text async for event in llm.stream([Message("user", "hello")], max_tokens=2048)]
+    assert "".join(events) == "OK"
+    assert create.call_args.kwargs["reasoning_effort"] == "high"
+    assert create.call_args.kwargs["max_completion_tokens"] == 8192
+    assert "temperature" not in create.call_args.kwargs
