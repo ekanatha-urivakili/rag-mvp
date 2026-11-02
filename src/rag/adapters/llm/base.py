@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -68,6 +69,29 @@ class RefusalError(Exception):
     pass
 
 
+# Default sampling temperatures: deterministic for orchestration/extraction/judging, slightly warmer for answers.
+COMPLETE_TEMPERATURE = 0.0
+STREAM_TEMPERATURE = 0.2
+
+# OpenAI reasoning models reject `temperature`. Claude models from Opus 4.7 / the 5.x generation on (incl. Fable,
+# Mythos) reject sampling parameters and use `effort` instead, so Anthropic is an allow-list of older models: a new
+# model family defaults to no `temperature` rather than a 400. Override per route entry with
+# `supports_temperature: true|false` in config/models.yaml.
+_OPENAI_NO_SAMPLING = re.compile(r"^(o\d|gpt-[5-9])")
+_ANTHROPIC_SAMPLING = re.compile(r"^claude-(?:3|(?:opus|sonnet|haiku)-4(?:-[0-6])?(?:$|@|-\d{8}))")
+
+
+def supports_temperature(provider: str, model: str, options: dict[str, Any]) -> bool:
+    """Whether to send `temperature` to this provider/model. Sending it to a model that rejects it is a 400."""
+    if "supports_temperature" in options:
+        return bool(options["supports_temperature"])
+    if provider == "anthropic":
+        return bool(_ANTHROPIC_SAMPLING.match(model))
+    if provider == "openai":
+        return not _OPENAI_NO_SAMPLING.match(model)
+    return True
+
+
 class LLM(Protocol):
     provider: str
     model: str
@@ -78,10 +102,12 @@ class LLM(Protocol):
         *,
         schema: type[BaseModel] | None = None,
         max_tokens: int,
-        temperature: float = 0.0,
+        temperature: float = COMPLETE_TEMPERATURE,
     ) -> Completion: ...
 
-    def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]: ...
+    def stream(
+        self, messages: list[Message], *, max_tokens: int, temperature: float = STREAM_TEMPERATURE
+    ) -> AsyncIterator[StreamEvent]: ...
 
 
 def split_system(messages: list[Message]) -> tuple[str, list[Message]]:

@@ -40,6 +40,7 @@ class RAGState(TypedDict, total=False):
     question: str
     question_message_id: str
     history: list[ChatTurn]
+    summary: str  # rolling summary of messages older than `history`
     filters: dict[str, str]
     standalone_query: str
     needs_retrieval: bool
@@ -52,9 +53,14 @@ class RAGState(TypedDict, total=False):
     models_used: Annotated[list[ModelUsage], operator.add]
 
 
+class QueryFilters(BaseModel):
+    category: Literal["document", "receipt"] | None = None
+
+
 class QueryAnalysis(BaseModel):
     standalone_query: str = Field(max_length=2000)
     needs_retrieval: bool
+    filters: QueryFilters = Field(default_factory=QueryFilters)
 
 
 class RewrittenQuery(BaseModel):
@@ -76,6 +82,30 @@ def _usage(purpose: str, provider: str, model: str, usage: Usage | None, ms: int
 
 def _history_block(history: list[ChatTurn]) -> str:
     return "\n".join(f"{t.role.upper()}: {t.content[:1500]}" for t in history) or "(no previous messages)"
+
+
+def _summary_block(state: RAGState) -> str:
+    summary = state.get("summary", "").strip()
+    return f"Summary of earlier messages:\n<summary>\n{_neutralize(summary)}\n</summary>\n\n" if summary else ""
+
+
+def _alternating_messages(history: list[ChatTurn], question: str) -> list[Message]:
+    """Coalesces consecutive same-role turns so strict alternating-role APIs never reject history."""
+    turns: list[tuple[Literal["user", "assistant"], str]] = []
+    for t in history:
+        if not t.content.strip():
+            continue
+        if turns and turns[-1][0] == t.role:
+            turns[-1] = (t.role, f"{turns[-1][1]}\n\n{t.content}")
+        else:
+            turns.append((t.role, t.content))
+    while turns and turns[0][0] != "user":
+        turns.pop(0)
+    if turns and turns[-1][0] == "user":
+        turns[-1] = ("user", f"{turns[-1][1]}\n\n{question}")
+    else:
+        turns.append(("user", question))
+    return [Message(role, content) for role, content in turns]
 
 
 def _neutralize(text: str) -> str:
@@ -108,14 +138,24 @@ def _llm(purpose: str) -> FallbackLLM:
 async def analyze_query(state: RAGState) -> dict[str, Any]:
     get_stream_writer()({"type": "status", "step": "analyzing"})
     llm = _llm("orchestration")
-    user = f"Conversation:\n{_history_block(state.get('history', []))}\n\nLatest message:\n{state['question']}"
+    user = (
+        f"{_summary_block(state)}Conversation:\n{_history_block(state.get('history', []))}"
+        f"\n\nLatest message:\n{state['question']}"
+    )
     res = await llm.complete(
         [Message("system", prompt("analyze_query")), Message("user", user)], schema=QueryAnalysis, max_tokens=300
     )
     assert isinstance(res.parsed, QueryAnalysis)
+    extracted = (
+        {"category": res.parsed.filters.category}
+        if res.parsed.filters and res.parsed.filters.category in {"document", "receipt"}
+        else {}
+    )
+    filters = {**extracted, **state.get("filters", {})}
     return {
         "standalone_query": res.parsed.standalone_query.strip() or state["question"],
         "needs_retrieval": res.parsed.needs_retrieval,
+        "filters": filters,
         "attempts": 0,
         "path": ["analyze_query"],
         "models_used": [_usage("orchestration", res.provider, res.model, res.usage, res.latency_ms, res.fallback_used)],
@@ -142,9 +182,11 @@ async def _stream_answer(purpose: str, messages: list[Message], max_tokens: int)
 
 async def respond_direct(state: RAGState) -> dict[str, Any]:
     get_stream_writer()({"type": "status", "step": "responding"})
-    messages = [Message("system", prompt("respond_direct"))]
-    messages += [Message(t.role, t.content) for t in state.get("history", [])[-4:]]
-    messages.append(Message("user", state["question"]))
+    messages = [
+        Message("system", prompt("respond_direct")),
+        *([Message("system", _summary_block(state).strip())] if state.get("summary") else []),
+        *_alternating_messages(state.get("history", [])[-4:], state["question"]),
+    ]
     text, usage = await _stream_answer("orchestration", messages, 400)
     return {"answer": text, "citations": [], "path": ["respond_direct"], "models_used": [usage]}
 

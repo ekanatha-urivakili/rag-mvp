@@ -3,7 +3,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, ValidationInfo, field_validator, model_validator
 
 from rag.auth.rbac import Role
 from rag.core.errors import DOCUMENT_PROCESSING_FAILURE
@@ -230,19 +230,48 @@ class Page[T](Out):
 
 
 # --- Chat ---
+class ModelConnectionIn(In):
+    provider: Literal["openai", "anthropic", "ollama"]
+    model: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+    api_key: SecretStr | None = Field(default=None, min_length=8, max_length=4096)
+
+    @model_validator(mode="after")
+    def provider_key(self) -> "ModelConnectionIn":
+        if self.provider == "ollama" and self.api_key is not None:
+            raise ValueError("Ollama models use the server's configured endpoint and do not need a key")
+        if self.provider != "ollama" and self.api_key is None:
+            raise ValueError("An API key is required for a personal cloud model")
+        return self
+
+
+class ChatModelOut(Out):
+    id: str
+    provider: str
+    model: str
+    source: Literal["server", "personal"]
+
+
+class ChatModelsOut(Out):
+    items: list[ChatModelOut]
+    default_id: str | None
+
+
 class ChatFilters(In):
     doc_id: uuid.UUID | None = None
+    category: Literal["document", "receipt"] | None = None
 
 
 class ChatIn(In):
     conversation_id: uuid.UUID | None = None
     message: str = Field(min_length=1, max_length=4000)
     filters: ChatFilters | None = None
+    model_id: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class ConversationOut(Out):
     id: uuid.UUID
     title: str
+    model_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

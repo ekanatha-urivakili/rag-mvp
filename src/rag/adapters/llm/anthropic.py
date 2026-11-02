@@ -5,6 +5,8 @@ import anthropic
 from pydantic import BaseModel
 
 from rag.adapters.llm.base import (
+    COMPLETE_TEMPERATURE,
+    STREAM_TEMPERATURE,
     Completion,
     Message,
     RefusalError,
@@ -14,6 +16,7 @@ from rag.adapters.llm.base import (
     parse_structured,
     split_system,
     strict_json_schema,
+    supports_temperature,
 )
 
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -36,14 +39,17 @@ class AnthropicLLM:
         self.model = model
         self._effort: str | None = options.get("effort")
         self._refusal_fallback: bool = bool(options.get("refusal_fallback", False))
+        self._sampling = supports_temperature(self.provider, model, options)
 
-    def _common(self, messages: list[Message], max_tokens: int) -> dict[str, Any]:
+    def _common(self, messages: list[Message], max_tokens: int, temperature: float) -> dict[str, Any]:
         system, rest = split_system(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
             "messages": [{"role": m.role, "content": _content(m)} for m in rest],
         }
+        if self._sampling:
+            kwargs["temperature"] = temperature
         if system:
             # Static system prompt first and marked cacheable; volatile content lives in messages.
             kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
@@ -60,9 +66,9 @@ class AnthropicLLM:
         *,
         schema: type[BaseModel] | None = None,
         max_tokens: int,
-        temperature: float = 0.0,
+        temperature: float = COMPLETE_TEMPERATURE,
     ) -> Completion:
-        kwargs = self._common(messages, max_tokens)
+        kwargs = self._common(messages, max_tokens, temperature)
         if schema is not None:
             fmt = {"type": "json_schema", "schema": strict_json_schema(schema)}
             kwargs["output_config"] = {**kwargs.get("output_config", {}), "format": fmt}
@@ -80,8 +86,10 @@ class AnthropicLLM:
             model=self.model,
         )
 
-    async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
-        async with self._client.beta.messages.stream(**self._common(messages, max_tokens)) as s:
+    async def stream(
+        self, messages: list[Message], *, max_tokens: int, temperature: float = STREAM_TEMPERATURE
+    ) -> AsyncIterator[StreamEvent]:
+        async with self._client.beta.messages.stream(**self._common(messages, max_tokens, temperature)) as s:
             async for text in s.text_stream:
                 yield StreamEvent(text=text)
             final = await s.get_final_message()

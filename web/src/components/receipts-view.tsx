@@ -28,8 +28,8 @@ export function ReceiptsView() {
     enabled: allowed,
     refetchInterval: () =>
       qc
-        .getQueryData<Page<DocumentItem>>(["receipt-uploads"])
-        ?.items.some((item) => ["queued", "processing"].includes(item.status))
+        .getQueriesData<Page<DocumentItem>>({ queryKey: ["receipt-uploads"] })
+        .some(([, data]) => data?.items.some((item) => ["queued", "processing"].includes(item.status)))
         ? 3000
         : false,
   });
@@ -214,9 +214,11 @@ function ReceiptCard({ receipt: r }: { receipt: ReceiptDetail }) {
 
 function ReceiptUploads() {
   const qc = useQueryClient();
+  const [page, setPage] = useState(0);
   const uploads = useQuery({
-    queryKey: ["receipt-uploads"],
-    queryFn: ({ signal }) => getJson<Page<DocumentItem>>("/api/v1/documents?kind=receipt&limit=100", signal),
+    queryKey: ["receipt-uploads", page],
+    queryFn: ({ signal }) =>
+      getJson<Page<DocumentItem>>(`/api/v1/documents?kind=receipt&limit=${SIZE}&offset=${page * SIZE}`, signal),
     refetchInterval: (query) =>
       query.state.data?.items.some((item) => ["queued", "processing"].includes(item.status)) ? 3000 : false,
   });
@@ -229,6 +231,14 @@ function ReceiptUploads() {
       {uploads.data?.items.map((item) => (
         <ReceiptUploadRow key={item.id} item={item} />
       ))}
+      {uploads.data && (page > 0 || uploads.data.total > SIZE) && (
+        <Pagination
+          page={page}
+          onChange={setPage}
+          hasNext={(page + 1) * SIZE < uploads.data.total}
+          busy={uploads.isFetching}
+        />
+      )}
     </section>
   );
 }

@@ -1,4 +1,4 @@
-# One image; api / worker / ui selected by command.
+# One image; api / worker selected by command.
 FROM docker.io/library/python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -22,7 +22,6 @@ RUN uv sync --no-dev --no-install-project $( [ -f uv.lock ] && echo --frozen )
 
 COPY src ./src
 COPY config ./config
-COPY ui ./ui
 COPY alembic.ini ./
 RUN uv sync --no-dev $( [ -f uv.lock ] && echo --frozen ) \
  && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
@@ -32,5 +31,5 @@ RUN useradd --system --uid 10001 --home /app app \
  && mkdir -p /models && chown -R app /models /opt/tiktoken
 USER app
 
-EXPOSE 8000 8501
+EXPOSE 8000 8001
 CMD ["uvicorn", "rag.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--no-access-log"]

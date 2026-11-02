@@ -98,11 +98,17 @@ def render_pdf_page(page: Any, dpi: int = 200) -> PILImage.Image:
     return PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
 
-def llm_image(data: bytes, mime: str) -> Image:
-    """The picture the vision model reads: the photo itself, or the first page of a PDF."""
+def llm_images(data: bytes, mime: str) -> tuple[Image, ...]:
+    """The pictures the vision model reads: the photo itself, or one image per PDF page.
+
+    PDFs longer than `max_receipt_image_pages` get no images: a partial set would make the model trust an image that
+    is missing the totals, so it extracts from the OCR text of every page instead.
+    """
     if mime == "application/pdf":
         import pymupdf
 
         with pymupdf.open(stream=data, filetype="pdf") as doc:  # type: ignore[no-untyped-call]
-            return for_llm(render_pdf_page(doc[0]))
-    return for_llm(load_image(data))
+            if len(doc) > get_settings().max_receipt_image_pages:
+                return ()
+            return tuple(for_llm(render_pdf_page(page)) for page in doc)
+    return (for_llm(load_image(data)),)

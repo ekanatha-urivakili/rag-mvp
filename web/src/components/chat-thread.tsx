@@ -5,11 +5,13 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { BrandMark } from "@/components/brand";
+import { useMe } from "@/components/app-shell";
+import { ChatModelPicker } from "@/components/chat-model-picker";
 import { Markdown } from "@/components/markdown";
 import { Alert, Button } from "@/components/ui";
 import { ApiError, getJson, request, sendJson } from "@/lib/client";
 import { parseSse } from "@/lib/sse";
-import type { Citation, ConversationDetail, Message } from "@/lib/types";
+import type { ChatModels, Citation, ConversationDetail, Message } from "@/lib/types";
 
 const MAX_CHARS = 4000;
 const OLDER_PAGE = 50;
@@ -55,6 +57,14 @@ export function ChatThread({ conversationId }: { conversationId: string | null }
 }
 
 function Thread({ conversationId, initial }: { conversationId: string | null; initial: ConversationDetail | null }) {
+  const me = useMe();
+  const models = useQuery({
+    queryKey: ["chat-models", me.tenant.id, me.user_id],
+    queryFn: ({ signal }) => getJson<ChatModels>("/api/v1/chat-models", signal),
+  });
+  const [selectedModel, setSelectedModel] = useState<string | null>(initial?.model_id ?? null);
+  const preferredModel = selectedModel ?? models.data?.default_id ?? "";
+  const modelId = models.data?.items.some((model) => model.id === preferredModel) ? preferredModel : "";
   const [messages, setMessages] = useState<UiMessage[]>(initial?.messages ?? []);
   const [hasMore, setHasMore] = useState(initial?.has_more ?? false);
   const [olderError, setOlderError] = useState<string | null>(null);
@@ -101,6 +111,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
   }
 
   async function send(text: string) {
+    if (!modelId) return;
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const now = new Date().toISOString();
@@ -124,7 +135,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
       const r = await request("/api/v1/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, conversation_id: conversationId }),
+        body: JSON.stringify({ message: text, conversation_id: conversationId, model_id: modelId }),
         signal: ctrl.signal,
       });
       if (!r.body) throw new ApiError(502, "Empty response");
@@ -185,6 +196,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
       const detail: ConversationDetail = {
         id: done.conversation_id,
         title: text.slice(0, 80),
+        model_id: modelId,
         created_at: now,
         updated_at: new Date().toISOString(),
         messages: [...before, userMsg, { ...reply }],
@@ -197,6 +209,14 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
 
   return (
     <div className="flex h-full flex-col">
+      <ChatModelPicker
+        catalog={models.data}
+        value={modelId}
+        onChange={setSelectedModel}
+        disabled={streaming}
+        loading={models.isPending}
+        failed={models.isError}
+      />
       <div
         ref={scrollRef}
         onScroll={(e) => {
@@ -232,6 +252,7 @@ function Thread({ conversationId, initial }: { conversationId: string | null; in
       </div>
       <Composer
         disabled={streaming}
+        canSend={!!modelId}
         onSend={(t) => void send(t)}
         onStop={() => abortRef.current?.abort()}
         placeholder={conversationId ? "Continue this conversation…" : "Ask about your documents…"}
@@ -406,11 +427,13 @@ function FeedbackButtons({ messageId }: { messageId: string }) {
 
 function Composer({
   disabled,
+  canSend,
   onSend,
   onStop,
   placeholder,
 }: {
   disabled: boolean;
+  canSend: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
   placeholder: string;
@@ -419,7 +442,7 @@ function Composer({
   const trimmed = text.trim();
 
   function submit() {
-    if (!trimmed || disabled || trimmed.length > MAX_CHARS) return;
+    if (!trimmed || disabled || !canSend || trimmed.length > MAX_CHARS) return;
     onSend(trimmed);
     setText("");
   }
@@ -459,7 +482,7 @@ function Composer({
             Stop
           </Button>
         ) : (
-          <Button type="submit" disabled={!trimmed} className="h-11 rounded-full">
+          <Button type="submit" disabled={!trimmed || !canSend} className="h-11 rounded-full">
             Send
           </Button>
         )}

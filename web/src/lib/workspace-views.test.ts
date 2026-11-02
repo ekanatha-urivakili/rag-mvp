@@ -20,6 +20,7 @@ vi.mock("@/components/app-shell", () => ({
   useCan: (permission: string) => state.me.permissions.includes(permission),
 }));
 
+const { DocumentsView } = await import("@/components/documents-view");
 const { MembersView } = await import("@/components/members-view");
 const { ReceiptsView } = await import("@/components/receipts-view");
 const { SettingsView } = await import("@/components/settings-view");
@@ -118,5 +119,31 @@ describe("workspace views", () => {
     const html = render(ReceiptsView, client);
     expect(html).toContain("No receipts");
     expect(html).toContain("Scan a receipt photo or upload a PDF here");
+  });
+  it("renders pagination controls on documents when total exceeds page size", () => {
+    const client = new QueryClient();
+    client.setQueryData(["documents", 0], {
+      items: [
+        {
+          id: "doc-1",
+          title: "guide.pdf",
+          kind: "document",
+          version: 1,
+          mime_type: "application/pdf",
+          size_bytes: 1024,
+          status: "ready",
+          error: null,
+          progress: null,
+          chunk_count: 4,
+          created_at: "2026-10-07T00:00:00Z",
+          updated_at: "2026-10-07T00:00:00Z",
+        },
+      ],
+      total: 120,
+    });
+    const html = render(DocumentsView, client);
+    expect(html).toContain("guide.pdf");
+    expect(html).toContain('aria-label="Pagination"');
+    expect(html).toContain("Page 1");
   });
 });

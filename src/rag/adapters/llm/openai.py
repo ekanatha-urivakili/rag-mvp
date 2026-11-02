@@ -6,6 +6,8 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from rag.adapters.llm.base import (
+    COMPLETE_TEMPERATURE,
+    STREAM_TEMPERATURE,
     Completion,
     Message,
     StreamEvent,
@@ -13,6 +15,7 @@ from rag.adapters.llm.base import (
     Usage,
     parse_structured,
     strict_json_schema,
+    supports_temperature,
 )
 
 
@@ -31,10 +34,15 @@ class OpenAILLM:
         self._client = client
         self.model = model
         self._options = options
+        self._sampling = supports_temperature(self.provider, model, options)
 
     @staticmethod
     def _msgs(messages: list[Message]) -> list[ChatCompletionMessageParam]:
         return [{"role": m.role, "content": _content(m)} for m in messages]  # type: ignore[misc]
+
+    def _sampling_kwargs(self, temperature: float) -> dict[str, Any]:
+        # Reasoning models (gpt-5, o-series) reject any temperature other than the default.
+        return {"temperature": temperature} if self._sampling else {}
 
     async def complete(
         self,
@@ -42,12 +50,13 @@ class OpenAILLM:
         *,
         schema: type[BaseModel] | None = None,
         max_tokens: int,
-        temperature: float = 0.0,
+        temperature: float = COMPLETE_TEMPERATURE,
     ) -> Completion:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self._msgs(messages),
             "max_completion_tokens": max_tokens,
+            **self._sampling_kwargs(temperature),
         }
         if schema is not None:
             kwargs["response_format"] = {
@@ -67,13 +76,16 @@ class OpenAILLM:
             model=self.model,
         )
 
-    async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, messages: list[Message], *, max_tokens: int, temperature: float = STREAM_TEMPERATURE
+    ) -> AsyncIterator[StreamEvent]:
         resp = await self._client.chat.completions.create(
             model=self.model,
             messages=self._msgs(messages),
             max_completion_tokens=max_tokens,
             stream=True,
             stream_options={"include_usage": True},
+            **self._sampling_kwargs(temperature),
         )
         usage = Usage()
         async for chunk in resp:

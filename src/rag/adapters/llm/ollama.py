@@ -5,6 +5,8 @@ import ollama
 from pydantic import BaseModel
 
 from rag.adapters.llm.base import (
+    COMPLETE_TEMPERATURE,
+    STREAM_TEMPERATURE,
     Completion,
     Message,
     StreamEvent,
@@ -38,7 +40,7 @@ class OllamaLLM:
         *,
         schema: type[BaseModel] | None = None,
         max_tokens: int,
-        temperature: float = 0.0,
+        temperature: float = COMPLETE_TEMPERATURE,
     ) -> Completion:
         with Timer() as t:
             resp = await self._client.chat(
@@ -59,11 +61,13 @@ class OllamaLLM:
             model=self.model,
         )
 
-    async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, messages: list[Message], *, max_tokens: int, temperature: float = STREAM_TEMPERATURE
+    ) -> AsyncIterator[StreamEvent]:
         resp = await self._client.chat(
             model=self.model,
             messages=self._msgs(messages),
-            options={"temperature": 0.2, "num_predict": max_tokens, **self._num_ctx},
+            options={"temperature": temperature, "num_predict": max_tokens, **self._num_ctx},
             think=self._think,
             keep_alive=self._keep_alive,
             stream=True,

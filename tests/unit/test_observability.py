@@ -30,7 +30,9 @@ class _Fake:
             raise ConnectionError("down")
         return Completion("ok", None, Usage(3, 5), 1, self.provider, self.model)
 
-    async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, messages: list[Message], *, max_tokens: int, temperature: float = 0.2
+    ) -> AsyncIterator[StreamEvent]:
         if self.fail:
             raise ConnectionError("down")
         yield StreamEvent(text="a")
@@ -110,7 +112,9 @@ async def test_cancelling_first_stream_read_closes_span(monkeypatch: pytest.Monk
     closed = asyncio.Event()
 
     class Waiting(_Fake):
-        async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
+        async def stream(
+            self, messages: list[Message], *, max_tokens: int, temperature: float = 0.2
+        ) -> AsyncIterator[StreamEvent]:
             try:
                 entered.set()
                 await asyncio.Event().wait()
@@ -134,7 +138,9 @@ async def test_closing_stream_closes_provider_iterator() -> None:
     closed = False
 
     class Closing(_Fake):
-        async def stream(self, messages: list[Message], *, max_tokens: int) -> AsyncIterator[StreamEvent]:
+        async def stream(
+            self, messages: list[Message], *, max_tokens: int, temperature: float = 0.2
+        ) -> AsyncIterator[StreamEvent]:
             nonlocal closed
             try:
                 yield StreamEvent(text="hello")

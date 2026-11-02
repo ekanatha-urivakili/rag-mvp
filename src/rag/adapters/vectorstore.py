@@ -9,7 +9,7 @@ from qdrant_client import models as qm
 from rag.core.config import get_settings
 
 POINT_NAMESPACE = uuid.UUID("6f1d3c1e-6b7a-4f0e-9d55-6a1c2b3d4e5f")
-ALLOWED_FILTER_KEYS = frozenset({"doc_id"})
+ALLOWED_FILTER_KEYS = frozenset({"doc_id", "category"})
 
 
 def point_id(document_id: uuid.UUID, version: int, chunk_index: int) -> str:
@@ -49,7 +49,11 @@ class VectorStore:
     def _tenant_filter(tenant_id: uuid.UUID, extra: dict[str, str] | None = None) -> qm.Filter:
         must: list[qm.Condition] = [qm.FieldCondition(key="tenant_id", match=qm.MatchValue(value=str(tenant_id)))]
         for k, v in (extra or {}).items():
-            if k in ALLOWED_FILTER_KEYS:
+            if k == "category":
+                # Points indexed before `category` existed have no value; keep them until a reindex backfills it.
+                match = qm.FieldCondition(key=k, match=qm.MatchValue(value=v))
+                must.append(qm.Filter(should=[match, qm.IsEmptyCondition(is_empty=qm.PayloadField(key=k))]))
+            elif k in ALLOWED_FILTER_KEYS:
                 must.append(qm.FieldCondition(key=k, match=qm.MatchValue(value=v)))
         return qm.Filter(must=must)
 
@@ -64,10 +68,25 @@ class VectorStore:
     async def ensure_collection(self, version: int = 1) -> None:
         current = await self.current_collection()
         if current is not None and current.startswith(self.collection_name(0).rsplit("_v", 1)[0] + "_v"):
+            await self._ensure_indexes(current)
             return
         name = self.collection_name(version)
         await self.create_collection(name)
         await self.point_alias_to(name)
+
+    async def dense_size(self, name: str) -> int | None:
+        vectors = (await self._client.get_collection(name)).config.params.vectors
+        dense = vectors.get("dense") if isinstance(vectors, dict) else None
+        return dense.size if dense else None
+
+    async def _ensure_indexes(self, name: str) -> None:
+        await self._client.create_payload_index(
+            name,
+            "tenant_id",
+            qm.KeywordIndexParams(type=qm.KeywordIndexType.KEYWORD, is_tenant=True),
+        )
+        await self._client.create_payload_index(name, "doc_id", qm.PayloadSchemaType.KEYWORD)
+        await self._client.create_payload_index(name, "category", qm.PayloadSchemaType.KEYWORD)
 
     async def create_collection(self, name: str) -> None:
         if not await self._client.collection_exists(name):
@@ -76,12 +95,7 @@ class VectorStore:
                 vectors_config={"dense": qm.VectorParams(size=self._dim, distance=qm.Distance.COSINE)},
                 sparse_vectors_config={"sparse": qm.SparseVectorParams(modifier=qm.Modifier.IDF)},
             )
-            await self._client.create_payload_index(
-                name,
-                "tenant_id",
-                qm.KeywordIndexParams(type=qm.KeywordIndexType.KEYWORD, is_tenant=True),
-            )
-            await self._client.create_payload_index(name, "doc_id", qm.PayloadSchemaType.KEYWORD)
+        await self._ensure_indexes(name)
 
     async def point_alias_to(self, name: str) -> None:
         ops: list[qm.AliasOperations] = []
@@ -109,11 +123,19 @@ class VectorStore:
             wait=True,
         )
 
-    async def delete_document(self, tenant_id: uuid.UUID, doc_id: uuid.UUID, keep_version: int | None = None) -> None:
+    async def delete_document(
+        self,
+        tenant_id: uuid.UUID,
+        doc_id: uuid.UUID,
+        keep_version: int | None = None,
+        collection: str | None = None,
+    ) -> None:
         f = self._tenant_filter(tenant_id, {"doc_id": str(doc_id)})
         if keep_version is not None:
             f.must_not = [qm.FieldCondition(key="doc_version", match=qm.MatchValue(value=keep_version))]
-        await self._client.delete(collection_name=self._alias, points_selector=qm.FilterSelector(filter=f), wait=True)
+        await self._client.delete(
+            collection_name=collection or self._alias, points_selector=qm.FilterSelector(filter=f), wait=True
+        )
 
     async def hybrid_search(
         self,

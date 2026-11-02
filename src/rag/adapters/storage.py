@@ -41,6 +41,9 @@ class ObjectStorage:
     async def put(self, key: str, data: bytes, content_type: str) -> None:
         await asyncio.to_thread(self._s3.put_object, Bucket=self._bucket, Key=key, Body=data, ContentType=content_type)
 
+    async def delete(self, key: str) -> None:
+        await asyncio.to_thread(self._s3.delete_object, Bucket=self._bucket, Key=key)
+
     async def get(self, key: str) -> bytes:
         resp = await asyncio.to_thread(self._s3.get_object, Bucket=self._bucket, Key=key)
 

@@ -20,6 +20,7 @@ async def test_cookie_refresh_requires_allowed_origin_and_uses_configured_name(
 ) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "refresh_cookie_name", "custom_refresh")
+    monkeypatch.setattr(settings, "cors_origins", ["http://localhost:3000"])
     response = await client.post("/v1/auth/login", json={"email": tenant.email, "password": PASSWORD})
     assert "custom_refresh=" in response.headers["set-cookie"]
     for headers in ({}, {"Origin": "http://evil.localhost:8501"}, {"Origin": "null"}):

@@ -13,7 +13,7 @@ routes:
     # refusal_fallback: server-side fallback when a safety classifier declines (beta).
     - { provider: anthropic, model: "claude-sonnet-5-5", timeout_s: 60, effort: "low", refusal_fallback: true }
     - { provider: openai,    model: "${OPENAI_GENERATION_MODEL}", timeout_s: 60 }
-    # Last fallback is local. Routing is deployment-wide; tenant-specific routing is not implemented.
+    # Standalone graphs use these fallbacks. Chat pins both analysis and generation to the user's selected model.
     - { provider: ollama,    model: "qwen3.5:4b", timeout_s: 90, think: false }
   eval_judge:
     - { provider: openai,    model: "${OPENAI_JUDGE_MODEL}", timeout_s: 60 }

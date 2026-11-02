@@ -1,5 +1,7 @@
+import contextlib
 import hashlib
 import uuid
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, UploadFile, status
@@ -15,11 +17,10 @@ from rag.auth.rbac import Permission
 from rag.core import ratelimit
 from rag.core.audit import audit
 from rag.core.config import get_settings
-from rag.core.errors import AppError, NotFound, PayloadTooLarge, UnsupportedMediaType
+from rag.core.errors import AppError, Conflict, NotFound, PayloadTooLarge, UnsupportedMediaType
 from rag.db.models import Chunk, Document, Tenant
 from rag.domain.models import RequestContext
-from rag.ingestion.locking import lock_index
-from rag.ingestion.pipeline import storage_key
+from rag.ingestion.pipeline import upload_key
 from rag.ingestion.sniff import IMAGES, PDF, sanitize_filename, sniff_mime
 from rag.worker.queue import enqueue
 
@@ -65,76 +66,126 @@ async def store_upload(
     mime = sniff_mime(data, title)
     if kind == "receipt" and mime not in {*IMAGES, PDF}:
         raise UnsupportedMediaType("Receipts must be PDF, JPEG, PNG or WebP")
-    content_hash = hashlib.sha256(data).hexdigest()
+    upload = _Upload(title=title, kind=kind, mime=mime, size=len(data), content_hash=hashlib.sha256(data).hexdigest())
+    storage = get_storage()
 
-    await lock_index(db)
-    await db.execute(select(Tenant.id).where(Tenant.id == ctx.tenant_id).with_for_update())
+    for _ in range(3):
+        # Unlocked reads pick the target document; the S3 put then runs with no transaction or lock held.
+        live = Document.status != "deleted"
+        mine = (Document.tenant_id == ctx.tenant_id, Document.kind == kind, live)
+        duplicate = (
+            await db.execute(select(Document.id).where(*mine, Document.content_hash == upload.content_hash))
+        ).scalar_one_or_none()
+        existing_id = (await db.execute(select(Document.id).where(*mine, Document.title == title))).scalar_one_or_none()
+        await db.commit()
+
+        doc_id = existing_id or uuid.uuid4()
+        key: str | None = None
+        if duplicate is None:
+            key = upload_key(ctx.tenant_id, doc_id)
+            await storage.put(key, data, mime)
+        try:
+            accepted = await _register_upload(db, ctx, response, upload, key, doc_id, existing=existing_id is not None)
+        except BaseException:
+            await db.rollback()
+            if key is not None:
+                with contextlib.suppress(Exception):
+                    await storage.delete(key)
+            raise
+        if key is not None and (accepted is None or not accepted.used_key):
+            with contextlib.suppress(Exception):
+                await storage.delete(key)
+        if accepted is not None:
+            return accepted.result
+    raise Conflict("The document changed while uploading. Try again.", code="upload_conflict")
+
+
+@dataclass(frozen=True)
+class _Upload:
+    title: str
+    kind: str
+    mime: str
+    size: int
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class _Registered:
+    result: UploadAccepted
+    used_key: bool
+
+
+async def _register_upload(
+    db: DB,
+    ctx: RequestContext,
+    response: Response,
+    upload: _Upload,
+    key: str | None,
+    doc_id: uuid.UUID,
+    *,
+    existing: bool,
+) -> _Registered | None:
+    """Records the upload in one short transaction. None means a concurrent change invalidated `key`; retry."""
+    s = get_settings()
     live = Document.status != "deleted"
+    mine = (Document.tenant_id == ctx.tenant_id, Document.kind == upload.kind, live)
+    await db.execute(select(Tenant.id).where(Tenant.id == ctx.tenant_id).with_for_update())
     same = (
-        await db.execute(
-            select(Document).where(
-                Document.tenant_id == ctx.tenant_id, Document.content_hash == content_hash, Document.kind == kind, live
-            )
-        )
+        await db.execute(select(Document).where(*mine, Document.content_hash == upload.content_hash))
     ).scalar_one_or_none()
     if same is not None:
         if same.status == "failed":
             same.status, same.error = "queued", None
             job = enqueue(db, "ingest_document", {"document_id": str(same.id), "version": same.version})
             await db.commit()
-            return UploadAccepted(document_id=same.id, job_id=job.id, status=same.status)
+            return _Registered(UploadAccepted(document_id=same.id, job_id=job.id, status=same.status), False)
+        accepted = UploadAccepted(document_id=same.id, job_id=None, status=same.status)
+        await db.rollback()  # releases the tenant lock; expires `same`
         response.status_code = status.HTTP_200_OK  # idempotent re-upload: no-op
-        return UploadAccepted(document_id=same.id, job_id=None, status=same.status)
+        return _Registered(accepted, False)
+    if key is None:
+        await db.rollback()
+        return None
 
     doc = (
-        await db.execute(
-            select(Document)
-            .where(Document.tenant_id == ctx.tenant_id, Document.title == title, Document.kind == kind, live)
-            .with_for_update()
-        )
+        await db.execute(select(Document).where(*mine, Document.title == upload.title).with_for_update())
     ).scalar_one_or_none()
+    if (doc.id if doc else None) != (doc_id if existing else None):
+        await db.rollback()
+        return None
     if doc is None:
         doc = Document(
-            id=uuid.uuid4(),
+            id=doc_id,
             tenant_id=ctx.tenant_id,
             uploaded_by=ctx.user_id,
-            title=title,
-            kind=kind,
+            title=upload.title,
+            kind=upload.kind,
             version=1,
-            mime_type=mime,
-            size_bytes=len(data),
-            content_hash=content_hash,
+            mime_type=upload.mime,
+            size_bytes=upload.size,
+            content_hash=upload.content_hash,
             status="queued",
             source_uri="",
         )
         db.add(doc)
     else:  # changed content under the same name → new version
         doc.version += 1
-        doc.mime_type, doc.size_bytes, doc.content_hash = mime, len(data), content_hash
+        doc.mime_type, doc.size_bytes, doc.content_hash = upload.mime, upload.size, upload.content_hash
         doc.status, doc.error, doc.uploaded_by = "queued", None, ctx.user_id
-
-    key = storage_key(ctx.tenant_id, doc.id, doc.version)
     doc.source_uri = f"s3://{s.s3_bucket}/{key}"
-    await get_storage().put(key, data, mime)
-    job = enqueue(db, "ingest_document", {"document_id": str(doc.id), "version": doc.version})
+    version = doc.version
+    job = enqueue(db, "ingest_document", {"document_id": str(doc_id), "version": version})
     try:
         await db.commit()
     except IntegrityError:
         # Concurrent upload of identical content won the race.
         await db.rollback()
-        existing = (
-            await db.execute(
-                select(Document).where(
-                    Document.tenant_id == ctx.tenant_id,
-                    Document.content_hash == content_hash,
-                    Document.kind == kind,
-                    live,
-                )
-            )
+        winner = (
+            await db.execute(select(Document).where(*mine, Document.content_hash == upload.content_hash))
         ).scalar_one()
         response.status_code = status.HTTP_200_OK
-        return UploadAccepted(document_id=existing.id, job_id=None, status=existing.status)
-    return UploadAccepted(document_id=doc.id, job_id=job.id, status=doc.status)
+        return _Registered(UploadAccepted(document_id=winner.id, job_id=None, status=winner.status), False)
+    return _Registered(UploadAccepted(document_id=doc_id, job_id=job.id, status="queued"), True)
 
 
 @router.get("", response_model=Page[DocumentOut])
@@ -178,7 +229,6 @@ async def get_document(document_id: uuid.UUID, ctx: Reader, db: DB) -> DocumentO
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(document_id: uuid.UUID, ctx: Deleter, db: DB) -> None:
-    await lock_index(db)
     doc = (
         await db.execute(
             select(Document)
@@ -188,17 +238,20 @@ async def delete_document(document_id: uuid.UUID, ctx: Deleter, db: DB) -> None:
     ).scalar_one_or_none()
     if doc is None:
         raise NotFound("Document not found")
-    await get_vectorstore().delete_document(ctx.tenant_id, doc.id)
+    doc_id = doc.id
     doc.status = "deleted"
-    enqueue(db, "purge_document", {"document_id": str(doc.id)})
+    enqueue(db, "purge_document", {"document_id": str(doc_id)})
     audit(
         db,
         action="document.deleted",
         tenant_id=ctx.tenant_id,
         actor_user_id=ctx.user_id,
         target_type="document",
-        target_id=doc.id,
+        target_id=doc_id,
         ip=ctx.ip,
         title=doc.title,
     )
     await db.commit()
+    # Best-effort immediate removal after DB commit; `purge_document` worker job guarantees retry on failure.
+    with contextlib.suppress(Exception):
+        await get_vectorstore().delete_document(ctx.tenant_id, doc_id)

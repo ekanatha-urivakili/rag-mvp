@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
@@ -15,6 +16,7 @@ from rag.adapters.vectorstore import PointIn, get_vectorstore, point_id
 from rag.core.config import get_settings
 from rag.core.errors import DOCUMENT_PROCESSING_FAILURE, LLMUnavailable
 from rag.core.logging import log_extra
+from rag.core.metrics import INGESTION_DOCS, INGESTION_DURATION
 from rag.db.models import Chunk, Document, Receipt, User
 from rag.email.outbox import queue_email
 from rag.ingestion.chunker import chunk_pages
@@ -23,14 +25,22 @@ from rag.ingestion.parsers import Page, parse
 from rag.ingestion.sniff import IMAGES, PDF
 from rag.receipts.extract import Receipt as ReceiptData
 from rag.receipts.extract import extract_receipt, to_markdown, worth_extracting
-from rag.receipts.ocr import llm_image
+from rag.receipts.ocr import llm_images
 
 log = logging.getLogger(__name__)
 
 
-def storage_key(tenant_id: uuid.UUID, document_id: uuid.UUID, version: int) -> str:
-    # Never derived from the user's filename (no path traversal into other tenants' prefixes).
-    return f"{tenant_id}/{document_id}/v{version}"
+def upload_key(tenant_id: uuid.UUID, document_id: uuid.UUID) -> str:
+    # Never derived from the user's filename (no path traversal into other tenants' prefixes). Unique per upload so
+    # an object written before the DB row is committed can never overwrite another upload's bytes.
+    return f"{tenant_id}/{document_id}/{uuid.uuid4()}"
+
+
+def object_key(source_uri: str) -> str:
+    prefix = f"s3://{get_settings().s3_bucket}/"
+    if not source_uri.startswith(prefix):
+        raise ValueError("Document source is not in the configured bucket")
+    return source_uri.removeprefix(prefix)
 
 
 class StaleJob(Exception):
@@ -49,9 +59,9 @@ async def _extract_receipt(
     async def announce(entry: RouteEntry) -> None:
         await progress({"step": "extracting", "provider": entry.provider, "model": entry.model})
 
-    image = await asyncio.to_thread(llm_image, raw, mime)
+    images = await asyncio.to_thread(llm_images, raw, mime)
     try:
-        return await extract_receipt(image, text, announce)
+        return await extract_receipt(images, text, announce)
     except LLMUnavailable:
         # OCR text is still indexed; structured fields need a model (local vision model or a cloud key).
         log.warning("receipt_extraction_unavailable")
@@ -59,6 +69,7 @@ async def _extract_receipt(
 
 
 async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
+    t0 = time.perf_counter()
     s = get_settings()
     doc_id, version = uuid.UUID(payload["document_id"]), int(payload["version"])
     await lock_index(db)
@@ -67,7 +78,7 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
         log.info("ingest_skipped_stale", extra=log_extra(document_id=str(doc_id)))
         return
     doc.status, doc.error, doc.progress = "processing", None, {"step": "reading"}
-    tenant_id, mime, kind = doc.tenant_id, doc.mime_type, doc.kind
+    mime, kind, key = doc.mime_type, doc.kind, object_key(doc.source_uri)
     await db.commit()
 
     # Slow work (OCR, LLM extraction) runs without the index lock or the document row lock held.
@@ -77,7 +88,7 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
         )
         await db.commit()
 
-    raw = await get_storage().get(storage_key(tenant_id, doc_id, version))
+    raw = await get_storage().get(key)
     if mime in IMAGES:
         await progress({"step": "ocr"})
     pages = await asyncio.to_thread(parse, raw, mime)
@@ -134,6 +145,8 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
                         "heading_path": c.heading_path,
                         "source": doc.title,
                         "page": c.page_start,
+                        "category": doc.kind,
+                        "doc_type": doc.mime_type,
                         "embedding_model": embedder.model,
                     },
                 )
@@ -148,6 +161,8 @@ async def ingest_document(db: AsyncSession, payload: dict[str, Any]) -> None:
         db.add(Receipt(document_id=doc.id, tenant_id=doc.tenant_id, version=version, **asdict(receipt)))
     doc.status, doc.progress = "ready", None
     await db.commit()
+    INGESTION_DOCS.labels(kind, "ready").inc()
+    INGESTION_DURATION.labels(kind).observe(time.perf_counter() - t0)
     log.info("ingest_done", extra=log_extra(document_id=str(doc.id), chunks=len(chunks)))
 
 
@@ -159,6 +174,7 @@ async def on_ingest_failed(db: AsyncSession, payload: dict[str, Any], error: str
     if doc is None or doc.version != int(payload["version"]) or doc.status == "deleted":
         return
     doc.status, doc.error, doc.progress = "failed", DOCUMENT_PROCESSING_FAILURE, None
+    INGESTION_DOCS.labels(doc.kind, "failed").inc()
     uploader = await db.get(User, doc.uploaded_by) if doc.uploaded_by else None
     if uploader is not None:
         queue_email(
