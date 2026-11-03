@@ -1,10 +1,15 @@
+import uuid
 from typing import Any
+from unittest.mock import AsyncMock
 from xml.etree import ElementTree
 
 import pytest
 
+from rag.adapters.llm.base import Completion, Usage
+from rag.core.config import get_settings
 from rag.domain.models import ScoredChunk
 from rag.graph import graph as g
+from rag.retrieval.retriever import RetrievalResult
 
 
 def _chunk(n: int, text: str = "text", score: float = 1.0) -> ScoredChunk:
@@ -77,3 +82,70 @@ def test_context_preserves_untrusted_text_inside_document(content: str) -> None:
 )
 def test_grade(state: Any, expected: str) -> None:
     assert g.grade(state) == expected
+
+
+def _completion(text: str = "", parsed: Any = None) -> Any:
+    return Completion(text=text, parsed=parsed, usage=Usage(), latency_ms=1, provider="p", model="m")
+
+
+@pytest.mark.parametrize(
+    ("raw", "limit", "expected"),
+    [
+        (["Price of A", " price of a ", "Q", "Price of B"], 4, ["Price of A", "Price of B"]),
+        (["Price of A", "Price of B", "Price of C"], 2, ["Price of A", "Price of B"]),
+        (["Price of A", "  "], 4, []),
+        (["q", "Price of A"], 4, []),
+    ],
+)
+def test_subqueries_are_distinct_and_need_two_parts(raw: list[str], limit: int, expected: list[str]) -> None:
+    assert g._distinct_subqueries(raw, "Q", limit) == expected
+
+
+@pytest.mark.parametrize("max_subqueries", [0, 3])
+async def test_analysis_requests_subqueries_only_when_enabled(
+    monkeypatch: pytest.MonkeyPatch, max_subqueries: int
+) -> None:
+    monkeypatch.setattr(get_settings(), "retrieval_max_subqueries", max_subqueries)
+    parsed = g.DecomposedQueryAnalysis(
+        standalone_query="Compare A and B", needs_retrieval=True, subqueries=["About A", "About B"]
+    )
+    complete = AsyncMock(
+        return_value=_completion(
+            parsed=parsed
+            if max_subqueries
+            else g.QueryAnalysis(standalone_query="Compare A and B", needs_retrieval=True)
+        )
+    )
+    monkeypatch.setattr(g, "_llm", lambda _purpose: AsyncMock(complete=complete))
+    out = await g.analyze_query({"question": "Compare A and B", "history": []})
+    messages, kwargs = complete.call_args.args[0], complete.call_args.kwargs
+    assert ("subqueries" in messages[0].content) == bool(max_subqueries)
+    assert kwargs["schema"] is (g.DecomposedQueryAnalysis if max_subqueries else g.QueryAnalysis)
+    assert out["subqueries"] == (["About A", "About B"] if max_subqueries else [])
+
+
+@pytest.mark.parametrize("hyde", [False, True])
+async def test_retrieve_node_passes_strategies_to_retriever(monkeypatch: pytest.MonkeyPatch, hyde: bool) -> None:
+    monkeypatch.setattr(get_settings(), "retrieval_hyde", hyde)
+    complete = AsyncMock(return_value=_completion(text=" A hypothetical passage. "))
+    monkeypatch.setattr(g, "_llm", lambda _purpose: AsyncMock(complete=complete))
+    retrieve = AsyncMock(return_value=RetrievalResult([_chunk(1)], reranked=True))
+    monkeypatch.setattr(g, "retrieve", retrieve)
+    state: Any = {"tenant_id": str(uuid.uuid4()), "standalone_query": "Q", "subqueries": ["A", "B"]}
+    out = await g.retrieve_node(state)
+    assert retrieve.call_args.kwargs == {
+        "subqueries": ["A", "B"],
+        "hypothetical": "A hypothetical passage." if hyde else None,
+    }
+    assert complete.await_count == int(hyde)
+    assert len(out["models_used"]) == int(hyde)
+
+
+async def test_hyde_failure_falls_back_to_query_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(get_settings(), "retrieval_hyde", True)
+    monkeypatch.setattr(g, "_llm", lambda _purpose: AsyncMock(complete=AsyncMock(side_effect=RuntimeError("down"))))
+    retrieve = AsyncMock(return_value=RetrievalResult([], reranked=False))
+    monkeypatch.setattr(g, "retrieve", retrieve)
+    out = await g.retrieve_node({"tenant_id": str(uuid.uuid4()), "standalone_query": "Q"})
+    assert retrieve.call_args.kwargs["hypothetical"] is None
+    assert out["models_used"] == []

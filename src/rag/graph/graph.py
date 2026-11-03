@@ -1,5 +1,6 @@
 import functools
 import inspect
+import logging
 import operator
 import re
 import time
@@ -18,11 +19,13 @@ from pydantic import BaseModel, Field
 from rag.adapters.llm.base import Message, RouteEntry, Usage
 from rag.adapters.llm.router import FallbackLLM, get_router
 from rag.core.config import get_settings
+from rag.core.metrics import RETRIEVAL_DEGRADED
 from rag.core.telemetry import tracer
 from rag.domain.models import ChatTurn, Citation, ModelUsage, ScoredChunk
 from rag.retrieval.context import build_context as build_context
 from rag.retrieval.retriever import retrieve
 
+log = logging.getLogger(__name__)
 PROMPT_VERSION = "v1"
 _PROMPTS = Path(__file__).parent / "prompts"
 _CITATION = re.compile(r"\[(\d+)\]")
@@ -44,6 +47,7 @@ class RAGState(TypedDict, total=False):
     summary: str  # rolling summary of messages older than `history`
     filters: dict[str, str]
     standalone_query: str
+    subqueries: list[str]
     needs_retrieval: bool
     chunks: list[ScoredChunk]
     reranked: bool
@@ -62,6 +66,10 @@ class QueryAnalysis(BaseModel):
     standalone_query: str = Field(max_length=2000)
     needs_retrieval: bool
     filters: QueryFilters = Field(default_factory=QueryFilters)
+
+
+class DecomposedQueryAnalysis(QueryAnalysis):
+    subqueries: list[str] = Field(default_factory=list)
 
 
 class RewrittenQuery(BaseModel):
@@ -133,10 +141,15 @@ async def analyze_query(state: RAGState) -> dict[str, Any]:
         f"{_summary_block(state)}Conversation:\n{_history_block(state.get('history', []))}"
         f"\n\nLatest message:\n{state['question']}"
     )
-    res = await llm.complete(
-        [Message("system", prompt("analyze_query")), Message("user", user)], schema=QueryAnalysis, max_tokens=300
-    )
+    max_subqueries = get_settings().retrieval_max_subqueries
+    system, schema, max_tokens = prompt("analyze_query"), QueryAnalysis, 300
+    if max_subqueries:
+        system = f"{system}\n\n{prompt('decompose_query').format(max=max_subqueries)}"
+        schema, max_tokens = DecomposedQueryAnalysis, 600
+    res = await llm.complete([Message("system", system), Message("user", user)], schema=schema, max_tokens=max_tokens)
     assert isinstance(res.parsed, QueryAnalysis)
+    standalone = res.parsed.standalone_query.strip() or state["question"]
+    raw = res.parsed.subqueries if isinstance(res.parsed, DecomposedQueryAnalysis) else []
     extracted = (
         {"category": res.parsed.filters.category}
         if res.parsed.filters and res.parsed.filters.category in {"document", "receipt"}
@@ -144,7 +157,8 @@ async def analyze_query(state: RAGState) -> dict[str, Any]:
     )
     filters = {**extracted, **state.get("filters", {})}
     return {
-        "standalone_query": res.parsed.standalone_query.strip() or state["question"],
+        "standalone_query": standalone,
+        "subqueries": _distinct_subqueries(raw, standalone, max_subqueries),
         "needs_retrieval": res.parsed.needs_retrieval,
         "filters": filters,
         "attempts": 0,
@@ -182,10 +196,43 @@ async def respond_direct(state: RAGState) -> dict[str, Any]:
     return {"answer": text, "citations": [], "path": ["respond_direct"], "models_used": [usage]}
 
 
+def _distinct_subqueries(raw: list[str], standalone: str, limit: int) -> list[str]:
+    """A single remaining subquery only paraphrases the question, so decomposition needs at least two."""
+    seen = {standalone.casefold()}
+    out: list[str] = []
+    for q in (q.strip()[:2000] for q in raw):
+        if q and q.casefold() not in seen:
+            seen.add(q.casefold())
+            out.append(q)
+    return out[:limit] if len(out) >= 2 else []
+
+
+async def _hypothesize(query: str) -> tuple[str | None, list[ModelUsage]]:
+    """HyDE passage for dense search. On failure retrieval proceeds without it."""
+    try:
+        res = await _llm("orchestration").complete(
+            [Message("system", prompt("hypothesize")), Message("user", query)], max_tokens=250
+        )
+    except Exception:
+        log.warning("hyde_failed_query_only", exc_info=True)
+        RETRIEVAL_DEGRADED.labels("hyde").inc()
+        return None, []
+    usage = _usage("orchestration", res.provider, res.model, res.usage, res.latency_ms, res.fallback_used)
+    return res.text.strip() or None, [usage]
+
+
 async def retrieve_node(state: RAGState) -> dict[str, Any]:
     get_stream_writer()({"type": "status", "step": "retrieving"})
-    result = await retrieve(uuid.UUID(state["tenant_id"]), state["standalone_query"], state.get("filters"))
-    return {"chunks": result.chunks, "reranked": result.reranked, "path": ["retrieve"]}
+    query = state["standalone_query"]
+    hypothetical, usage = await _hypothesize(query) if get_settings().retrieval_hyde else (None, [])
+    result = await retrieve(
+        uuid.UUID(state["tenant_id"]),
+        query,
+        state.get("filters"),
+        subqueries=state.get("subqueries", []),
+        hypothetical=hypothetical,
+    )
+    return {"chunks": result.chunks, "reranked": result.reranked, "path": ["retrieve"], "models_used": usage}
 
 
 def grade(state: RAGState) -> Literal["generate", "rewrite_query", "insufficient_context"]:

@@ -114,3 +114,54 @@ async def test_category_filter_checks_authoritative_document_kind(
     monkeypatch.setattr(retriever, "get_reranker", lambda: AsyncMock(score=AsyncMock(return_value=[1.0])))
     result = await retriever.retrieve(tenant.tenant_id, "query", {"category": "receipt"})
     assert [c.text for c in result.chunks] == ["receipt"]
+
+
+async def test_subqueries_rerank_by_best_query_and_hyde_is_search_only(
+    client: httpx.AsyncClient,
+    tenant: Account,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hits = []
+    async with get_sessionmaker()() as db:
+        for title in ("alpha", "beta"):
+            doc = Document(
+                id=uuid.uuid4(),
+                tenant_id=tenant.tenant_id,
+                uploaded_by=tenant.user_id,
+                title=title,
+                source_uri="test",
+                mime_type="text/plain",
+                size_bytes=1,
+                content_hash=title,
+                version=1,
+                status="ready",
+            )
+            db.add(doc)
+            hits.append(
+                Hit(
+                    id=str(doc.id),
+                    score=1.0,
+                    payload={"doc_id": str(doc.id), "doc_version": 1, "chunk_index": 0, "text": title, "source": title},
+                )
+            )
+        await db.commit()
+    scores = {"compare": [0.1, 0.2], "about alpha": [3.0, -1.0], "about beta": [-1.0, 2.0]}
+    embed = AsyncMock(return_value=[[1.0]] * 4)
+    sparse = AsyncMock(side_effect=lambda q: q)
+    search = AsyncMock(return_value=hits)
+    rerank = AsyncMock(side_effect=lambda q, _texts: scores[q])
+    monkeypatch.setattr(get_settings(), "retrieval_neighbor_radius", 0)
+    monkeypatch.setattr(retriever, "get_embedder", lambda: AsyncMock(embed=embed))
+    monkeypatch.setattr(retriever, "get_sparse_embedder", lambda: AsyncMock(embed_query=sparse))
+    monkeypatch.setattr(retriever, "get_vectorstore", lambda: AsyncMock(hybrid_search=search))
+    monkeypatch.setattr(retriever, "get_reranker", lambda: AsyncMock(score=rerank))
+
+    result = await retriever.retrieve(
+        tenant.tenant_id, "compare", subqueries=["about alpha", "about beta"], hypothetical="made-up answer"
+    )
+
+    assert embed.call_args.args[0] == ["compare", "about alpha", "about beta", "made-up answer"]
+    assert search.call_args.args[2] == ["compare", "about alpha", "about beta"]
+    assert [call.args[0] for call in rerank.call_args_list] == ["compare", "about alpha", "about beta"]
+    assert [(c.text, c.score) for c in result.chunks] == [("alpha", 3.0), ("beta", 2.0)]
+    assert result.reranked
