@@ -20,6 +20,7 @@ from rag.adapters.llm.router import FallbackLLM, get_router
 from rag.core.config import get_settings
 from rag.core.telemetry import tracer
 from rag.domain.models import ChatTurn, Citation, ModelUsage, ScoredChunk
+from rag.retrieval.context import build_context as build_context
 from rag.retrieval.retriever import retrieve
 
 PROMPT_VERSION = "v1"
@@ -110,16 +111,6 @@ def _alternating_messages(history: list[ChatTurn], question: str) -> list[Messag
 
 def _neutralize(text: str) -> str:
     return escape(text, quote=True)
-
-
-def build_context(chunks: list[ScoredChunk]) -> str:
-    blocks = []
-    for n, c in enumerate(chunks, start=1):
-        page = f' page="{c.page}"' if c.page is not None else ""
-        source = _neutralize(c.source)
-        heading = f"{_neutralize(c.heading_path)}\n" if c.heading_path else ""
-        blocks.append(f'<doc id="{n}" source="{source}"{page}>\n{heading}{_neutralize(c.text)}\n</doc>')
-    return "\n\n".join(blocks)
 
 
 def _llm(purpose: str) -> FallbackLLM:

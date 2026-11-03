@@ -14,6 +14,7 @@ from rag.core.metrics import RETRIEVAL_DEGRADED, TOP_SCORE
 from rag.db.models import Document
 from rag.db.session import get_sessionmaker
 from rag.domain.models import ScoredChunk
+from rag.retrieval.context import neighboring_chunks, select_context
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | N
                     select(Document.id, Document.version).where(
                         Document.tenant_id == tenant_id,
                         Document.status == "ready",
+                        *([Document.kind == filters["category"]] if filters and "category" in filters else []),
                         Document.id.in_([uuid.UUID(h.payload["doc_id"]) for h in hits]),
                     )
                 )
@@ -80,7 +82,11 @@ async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | N
         except Exception:
             log.warning("rerank_failed_using_rrf", exc_info=True)
             RETRIEVAL_DEGRADED.labels("rerank").inc()
-    top = chunks[: s.retrieval_top_k]
+    top = select_context(chunks[: s.retrieval_top_k], s.context_max_tokens)
+    neighbors = await neighboring_chunks(tenant_id, top, s.retrieval_neighbor_radius)
+    top = select_context([*top, *neighbors], s.context_max_tokens)
+    if not top:
+        return RetrievalResult([], reranked=reranked)
     if reranked:
         TOP_SCORE.observe(top[0].score)
     span = trace.get_current_span()

@@ -88,8 +88,10 @@ class Settings(BaseSettings):
     sparse_model: str = "Qdrant/bm25"
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_enabled: bool = True
-    retrieval_prefetch: int = 40
-    retrieval_top_k: int = 8
+    retrieval_prefetch: int = Field(default=40, ge=1, le=200)
+    retrieval_top_k: int = Field(default=8, ge=1, le=40)
+    retrieval_neighbor_radius: int = Field(default=0, ge=0, le=2)
+    context_max_tokens: int = Field(default=6000, ge=128, le=32000)
     grade_threshold: float = 0.0
     chunk_tokens: int = 500
     chunk_overlap: int = 50
