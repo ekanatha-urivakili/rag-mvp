@@ -1,6 +1,6 @@
 """Golden-set evaluation.
 
-Retrieval (deterministic): recall@k and MRR against expected source documents.
+Retrieval (deterministic): source-label recall@k, precision@k and MRR.
 Generation: faithfulness + answer relevancy, judged by the `eval_judge` route (a different vendor than generation).
 
   python evals/run_eval.py --tenant-id <uuid> [--provider anthropic|openai|ollama] [--retrieval-only]
@@ -29,16 +29,26 @@ async def main() -> int:
     p.add_argument("--provider", help="Pin the generation route to one provider")
     p.add_argument("--retrieval-only", action="store_true")
     p.add_argument("--min-recall", type=float)
+    p.add_argument("--min-precision", type=float)
     p.add_argument("--min-faithfulness", type=float)
     args = p.parse_args()
+    if args.k < 1:
+        p.error("--k must be positive")
+    for name in ("min_recall", "min_precision", "min_faithfulness"):
+        value = getattr(args, name)
+        if value is not None and not 0 <= value <= 1:
+            p.error(f"--{name.replace('_', '-')} must be between 0 and 1")
     if args.provider:
         os.environ["RAG_PIN_PROVIDER"] = args.provider
 
     from rag.evaluation.judge import judge
+    from rag.evaluation.retrieval import retrieval_metrics
     from rag.graph.graph import build_context, build_graph
     from rag.retrieval.retriever import retrieve
 
     cases = [json.loads(line) for line in Path(args.golden).read_text().splitlines() if line.strip()]
+    if not cases:
+        p.error("golden set must contain at least one case")
     rows: list[dict[str, Any]] = []
     for case in cases:
         row: dict[str, Any] = {"question": case["question"]}
@@ -46,8 +56,10 @@ async def main() -> int:
         if expected:
             res = await retrieve(args.tenant_id, case["question"])
             sources = [c.source for c in res.chunks[: args.k]]
-            row["recall"] = len(expected & set(sources)) / len(expected)
-            row["mrr"] = next((1 / (i + 1) for i, s in enumerate(sources) if s in expected), 0.0)
+            metrics = retrieval_metrics(sources, expected, args.k)
+            row["recall"] = metrics.recall
+            row["precision"] = metrics.precision
+            row["mrr"] = metrics.mrr
         if not args.retrieval_only:
             t0 = time.perf_counter()
             state = await build_graph().ainvoke(
@@ -78,12 +90,13 @@ async def main() -> int:
 
     def mean(key: str) -> float | None:
         vals = [r[key] for r in rows if key in r]
-        return round(statistics.mean(vals), 4) if vals else None
+        return statistics.mean(vals) if vals else None
 
     summary = {
         "provider": args.provider or "route-default",
         "n": len(rows),
         f"recall@{args.k}": mean("recall"),
+        f"precision@{args.k}": mean("precision"),
         "mrr": mean("mrr"),
         "faithfulness": mean("faithfulness"),
         "relevancy": mean("relevancy"),
@@ -99,8 +112,13 @@ async def main() -> int:
     out.write_text(json.dumps({"summary": summary, "rows": rows}, indent=2))
     print(json.dumps(summary, indent=2))
 
-    failed = (args.min_recall is not None and (summary[f"recall@{args.k}"] or 0) < args.min_recall) or (
-        args.min_faithfulness is not None and (summary["faithfulness"] or 0) < args.min_faithfulness
+    failed = any(
+        threshold is not None and (value is None or value < threshold)
+        for threshold, value in (
+            (args.min_recall, summary[f"recall@{args.k}"]),
+            (args.min_faithfulness, summary["faithfulness"]),
+            (args.min_precision, summary[f"precision@{args.k}"]),
+        )
     )
     return 1 if failed else 0
 
