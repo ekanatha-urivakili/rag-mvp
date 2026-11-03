@@ -246,7 +246,7 @@ async def test_reindex_retry_removes_ghosts_and_preserves_previous_collection(
         async with get_sessionmaker()() as db:
             await module.reindex(db, {"target_version": 991})
         assert await store.current_collection() == target
-        hits = await store.hybrid_search(tenant.tenant_id, [1.0] * dim, sparse, 10)
+        hits = await store.hybrid_search(tenant.tenant_id, [[1.0] * dim], [sparse], 10)
         assert len(hits) == 1 and hits[0].payload["doc_id"] == str(doc_id)
         assert previous and await store._client.collection_exists(previous)
     finally:

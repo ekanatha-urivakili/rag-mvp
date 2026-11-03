@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=8, ge=1, le=40)
     retrieval_neighbor_radius: int = Field(default=0, ge=0, le=2)
     context_max_tokens: int = Field(default=6000, ge=128, le=32000)
+    retrieval_max_subqueries: int = Field(default=0, ge=0, le=4)  # 0 disables query decomposition
+    retrieval_hyde: bool = False
     grade_threshold: float = 0.0
     chunk_tokens: int = 500
     chunk_overlap: int = 50

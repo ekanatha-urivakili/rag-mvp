@@ -253,6 +253,7 @@ async def _run(state: RAGState, conversation_id: uuid.UUID, trace_id: str, start
     debug = {
         "path": final.get("path", []),
         "standalone_query": final.get("standalone_query"),
+        "subqueries": final.get("subqueries", []),
         "scores": [round(c.score, 4) for c in final.get("chunks", [])],
         "models": [u.model_dump() for u in usages],
     }

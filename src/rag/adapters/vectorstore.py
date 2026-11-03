@@ -140,15 +140,15 @@ class VectorStore:
     async def hybrid_search(
         self,
         tenant_id: uuid.UUID,
-        dense: list[float],
-        sparse: qm.SparseVector | None,
+        dense: list[list[float]],
+        sparse: list[qm.SparseVector],
         limit: int,
         filters: dict[str, str] | None = None,
     ) -> list[Hit]:
+        """One prefetch per query vector, all fused by reciprocal rank in a single request."""
         f = self._tenant_filter(tenant_id, filters)
-        prefetch = [qm.Prefetch(query=dense, using="dense", limit=limit, filter=f)]
-        if sparse is not None and sparse.indices:
-            prefetch.append(qm.Prefetch(query=sparse, using="sparse", limit=limit, filter=f))
+        prefetch = [qm.Prefetch(query=d, using="dense", limit=limit, filter=f) for d in dense]
+        prefetch += [qm.Prefetch(query=s, using="sparse", limit=limit, filter=f) for s in sparse if s.indices]
         resp = await self._client.query_points(
             collection_name=self._alias,
             prefetch=prefetch,

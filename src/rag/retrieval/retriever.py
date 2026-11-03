@@ -1,5 +1,6 @@
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from opentelemetry import trace
@@ -25,16 +26,30 @@ class RetrievalResult:
     reranked: bool
 
 
-async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | None = None) -> RetrievalResult:
-    """Hybrid (dense + BM25, RRF) → cross-encoder rerank → top-k. Degrades gracefully on partial failure."""
+async def retrieve(
+    tenant_id: uuid.UUID,
+    query: str,
+    filters: dict[str, str] | None = None,
+    *,
+    subqueries: Sequence[str] = (),
+    hypothetical: str | None = None,
+) -> RetrievalResult:
+    """Hybrid (dense + BM25, RRF) → cross-encoder rerank → top-k. Degrades gracefully on partial failure.
+
+    Subqueries add dense and sparse searches to the same fusion, and each chunk keeps its best rerank score
+    across the query and subqueries. A hypothetical answer (HyDE) adds a dense search only: it is never a
+    rerank query and never returned as evidence.
+    """
     s = get_settings()
-    dense = (await get_embedder().embed([query]))[0]
+    queries = [query, *subqueries]
+    dense = await get_embedder().embed([*queries, *([hypothetical] if hypothetical else [])])
+    sparse_embedder = get_sparse_embedder()
     try:
-        sparse = await get_sparse_embedder().embed_query(query)
+        sparse = [await sparse_embedder.embed_query(q) for q in queries]
     except Exception:
         log.warning("sparse_embed_failed_dense_only", exc_info=True)
         RETRIEVAL_DEGRADED.labels("sparse").inc()
-        sparse = None
+        sparse = []
 
     hits = await get_vectorstore().hybrid_search(tenant_id, dense, sparse, s.retrieval_prefetch, filters)
     # Qdrant is derived state: failed, deleted and superseded versions cannot be answer context.
@@ -72,10 +87,9 @@ async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | N
     reranked = False
     if s.reranker_enabled:
         try:
-            scores = await get_reranker().score(
-                query, [f"{c.heading_path}\n{c.text}" if c.heading_path else c.text for c in chunks]
-            )
-            for c, sc in zip(chunks, scores, strict=True):
+            texts = [f"{c.heading_path}\n{c.text}" if c.heading_path else c.text for c in chunks]
+            per_query = [await get_reranker().score(q, texts) for q in queries]
+            for c, sc in zip(chunks, map(max, zip(*per_query, strict=True)), strict=True):
                 c.score = sc
             chunks.sort(key=lambda c: c.score, reverse=True)
             reranked = True
@@ -93,6 +107,8 @@ async def retrieve(tenant_id: uuid.UUID, query: str, filters: dict[str, str] | N
     span.set_attribute("rag.retrieval.candidates", len(hits))
     span.set_attribute("rag.retrieval.top_score", top[0].score)
     span.set_attribute("rag.retrieval.reranked", reranked)
+    span.set_attribute("rag.retrieval.queries", len(queries))
+    span.set_attribute("rag.retrieval.hyde", hypothetical is not None)
     log.info(
         "retrieved",
         extra=log_extra(candidates=len(hits), top_score=round(top[0].score, 4), reranked=reranked),

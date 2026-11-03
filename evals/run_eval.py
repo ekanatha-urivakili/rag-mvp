@@ -1,10 +1,13 @@
 """Golden-set evaluation.
 
 Retrieval (deterministic): source-label recall@k, precision@k and MRR.
+Graph context: the same metrics over the chunks the full graph used, so query strategies are measured end to end.
+Answer rate: share of labelled (answerable) cases that produced a cited answer instead of declining.
 Generation: faithfulness + answer relevancy, judged by the `eval_judge` route (a different vendor than generation).
 
   python evals/run_eval.py --tenant-id <uuid> [--provider anthropic|openai|ollama] [--retrieval-only]
                            [--min-recall 0.85 --min-faithfulness 0.90]   # CI gate: exit 1 on regression
+                           [--min-answer-rate 0.90]
 """
 
 import argparse
@@ -31,10 +34,11 @@ async def main() -> int:
     p.add_argument("--min-recall", type=float)
     p.add_argument("--min-precision", type=float)
     p.add_argument("--min-faithfulness", type=float)
+    p.add_argument("--min-answer-rate", type=float)
     args = p.parse_args()
     if args.k < 1:
         p.error("--k must be positive")
-    for name in ("min_recall", "min_precision", "min_faithfulness"):
+    for name in ("min_recall", "min_precision", "min_faithfulness", "min_answer_rate"):
         value = getattr(args, name)
         if value is not None and not 0 <= value <= 1:
             p.error(f"--{name.replace('_', '-')} must be between 0 and 1")
@@ -43,7 +47,7 @@ async def main() -> int:
 
     from rag.evaluation.judge import judge
     from rag.evaluation.retrieval import retrieval_metrics
-    from rag.graph.graph import build_context, build_graph
+    from rag.graph.graph import INSUFFICIENT, build_context, build_graph
     from rag.retrieval.retriever import retrieve
 
     cases = [json.loads(line) for line in Path(args.golden).read_text().splitlines() if line.strip()]
@@ -81,6 +85,11 @@ async def main() -> int:
             row["fallbacks"] = sum(u.fallback_used for u in state["models_used"])
             if "needs_retrieval" in case:
                 row["routing_correct"] = state["needs_retrieval"] == case["needs_retrieval"]
+            if expected:
+                graph_metrics = retrieval_metrics([c.source for c in state.get("chunks", [])], expected, args.k)
+                row["graph_recall"] = graph_metrics.recall
+                row["graph_precision"] = graph_metrics.precision
+                row["answered"] = "generate" in state["path"] and state["answer"] != INSUFFICIENT
             if state.get("chunks") and "generate" in state["path"]:
                 verdict, _, _ = await judge(build_context(state["chunks"]), case["question"], state["answer"])
                 row["faithfulness"] = verdict.faithfulness
@@ -98,6 +107,9 @@ async def main() -> int:
         f"recall@{args.k}": mean("recall"),
         f"precision@{args.k}": mean("precision"),
         "mrr": mean("mrr"),
+        f"graph_recall@{args.k}": mean("graph_recall"),
+        f"graph_precision@{args.k}": mean("graph_precision"),
+        "answer_rate": mean("answered"),
         "faithfulness": mean("faithfulness"),
         "relevancy": mean("relevancy"),
         "routing_accuracy": mean("routing_correct"),
@@ -118,6 +130,7 @@ async def main() -> int:
             (args.min_recall, summary[f"recall@{args.k}"]),
             (args.min_faithfulness, summary["faithfulness"]),
             (args.min_precision, summary[f"precision@{args.k}"]),
+            (args.min_answer_rate, summary["answer_rate"]),
         )
     )
     return 1 if failed else 0

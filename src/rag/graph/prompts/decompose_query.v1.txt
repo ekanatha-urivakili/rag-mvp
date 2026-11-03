@@ -1,0 +1,3 @@
+Also return "subqueries": a list of at most {max} search queries, one per distinct part, ONLY when the latest
+message asks about several separate things, such as a comparison or several unrelated facts. Each subquery must
+stand alone and keep names, IDs, codes and numbers exactly. For a single-topic question return an empty list.
