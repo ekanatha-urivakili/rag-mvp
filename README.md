@@ -48,6 +48,7 @@ The UI is Next.js. See the [HLD](#high-level-design-hld) and [ERD](#entity-relat
 - Re-embedding (`rag reindex`) through a Qdrant alias swap, with bounded batches and retry recovery. Model/dimension changes require coordinated API/worker settings and a query pause ([operations](#operations)).
 - Retrieval and faithfulness evals (`evals/run_eval.py`).
 - Token-budgeted, deduplicated context with optional adjacent-chunk expansion. See the [15-concept RAG assessment](docs/RAG_QUALITY.md) for implementation status, settings, and evaluation limits.
+- LLM platform direction: an assessment of state, caching, guardrails and observability, with the target [HLD, LLDs and implementation plan](docs/llm-platform/README.md), [ADRs](docs/adr/README.md) and the [LLM-path review checklist](docs/engineering/TECH_DIRECTION.md).
 - Next.js web UI that keeps API tokens out of the browser (backend-for-frontend), with CSRF, CSP and XSS controls ([details](#web-ui)).
 - Prometheus metrics, OpenTelemetry tracing, alert rules and a Grafana dashboard ([details](#observability)); sampled online faithfulness grading.
 - Backup/restore with an automated restore test, a Locust load test, and [runbooks](docs/RUNBOOKS.md).
