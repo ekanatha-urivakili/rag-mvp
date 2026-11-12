@@ -801,6 +801,8 @@ The `web` image runs behind the HTTPS ingress; keep the API private (with separa
 
 ## 9. Key Decisions (ADR summary)
 
+Decisions made after this table was written are recorded one per file in [`docs/adr/`](adr/). The target design for state, caching, guardrails and observability on the LLM path is in [`docs/llm-platform/`](llm-platform/).
+
 | Decision | Chosen | Rejected | Reason |
 | --- | --- | --- | --- |
 | Orchestration | LangGraph state machine | AutoGen; free-form multi-agent chat | Deterministic, testable control flow; checkpointing; extend with subgraphs |
